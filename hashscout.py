@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 HashScout - Smart Video & File Duplicate Finder
-Combines Bit-Exact SHA256 Hashing, Video Duration Analysis, Title Matching,
+Combines Bit-Exact SHA256 Hashing, Video Duration Analysis,
 and an Interactive Deletion Manager.
 """
 
@@ -10,19 +10,17 @@ import sys
 import argparse
 import hashlib
 import subprocess
-import json
 from pathlib import Path
-from difflib import SequenceMatcher
 from datetime import datetime
 
 # Common video extensions
 VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg'}
 
 BANNER = r"""
-  _  _           _     ___cout 
- | || |__ _ ___| |_  / __| __ ___ _  _| |_ 
- | __ / _` (_-< ' \| (__| _|/ _ \ || |  _|
- |_||_\__,_/__/_||_|\___|_| \___/\_,_|\__|
+ _  _         _    ___              _   
+| || |__ _ __| |_ / __| __ ___ _  _| |_ 
+| __ / _` (_-< ' \__ \/ _/ _ \ || |  _|
+|_||_\__,_/__/_||_|___/\__\___/\_,_|\__|
    [Smart Video & Bit-Exact Duplicate Finder by Mohamed BOURI]
 """
 
@@ -77,21 +75,46 @@ def get_file_hash(file_path: Path, partial: bool = False) -> str:
 
     return hasher.hexdigest()
 
-def title_similarity(name1: str, name2: str) -> float:
-    """Calculate string similarity ratio between two file titles."""
-    return SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
-
 def scan_directory(target_dir: Path, video_only: bool = False) -> list[Path]:
-    """Recursively collect files from target directory."""
+    """Recursively collect files from target directory.
+
+    Uses os.walk with an error callback so that permission-denied
+    subdirectories are reported instead of silently skipped - a plain
+    Path.rglob() swallows PermissionError without a trace, which for a
+    duplicate finder means it could report "no duplicates" while quietly
+    never having looked inside part of the tree.
+    """
     files = []
-    for path in target_dir.rglob("*"):
-        if path.is_file() and not path.is_symlink():
-            if video_only and path.suffix.lower() not in VIDEO_EXTENSIONS:
+    skipped_dirs = []
+
+    def _on_error(os_error: OSError) -> None:
+        skipped_dirs.append(getattr(os_error, "filename", None) or str(os_error))
+
+    for root, _dirnames, filenames in os.walk(target_dir, onerror=_on_error):
+        root_path = Path(root)
+        for name in filenames:
+            fpath = root_path / name
+            if fpath.is_symlink():
                 continue
-            files.append(path)
+            if video_only and fpath.suffix.lower() not in VIDEO_EXTENSIONS:
+                continue
+            try:
+                if fpath.is_file():
+                    files.append(fpath)
+            except OSError:
+                continue
+
+    if skipped_dirs:
+        label = "directory" if len(skipped_dirs) == 1 else "directories"
+        print(f"[!] Skipped {len(skipped_dirs)} unreadable {label} (permission denied):")
+        for d in skipped_dirs[:10]:
+            print(f"    - {d}")
+        if len(skipped_dirs) > 10:
+            print(f"    ... and {len(skipped_dirs) - 10} more")
+
     return files
 
-def find_duplicates(files: list[Path], fuzzy_titles: bool = False) -> list[list[Path]]:
+def find_duplicates(files: list[Path]) -> list[list[Path]]:
     """Pipeline to detect duplicates using Size -> Partial Hash -> Full Hash / Duration."""
     print(f"[*] Total files scanned: {len(files)}")
 
@@ -171,7 +194,11 @@ def interactive_delete(duplicate_groups: list[list[Path]], dry_run: bool = True)
         print("  Type 'q' to QUIT execution.")
 
         while True:
-            choice = input("\nSelect file to KEEP > ").strip().lower()
+            try:
+                choice = input("\nSelect file to KEEP > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n[!] Input closed. Exiting duplicate manager.")
+                return
 
             if choice in ['s', 'k', '']:
                 print("[*] Skipped group.")
