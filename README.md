@@ -1,5 +1,3 @@
-
-
 # HashScout
 
 ```text
@@ -27,6 +25,12 @@
 
 ---
 
+## ⚠️ Deletion Is Permanent
+
+HashScout deletes files with `os.unlink()` — there is **no trash/recycle bin, and no undo**. Always run without `--apply` first and read the preview carefully. For anything irreplaceable, keep a backup before you run deletion mode.
+
+---
+
 ## 🛠️ Requirements
 
 * **Python 3.10+**
@@ -35,34 +39,25 @@
 * Ubuntu/Debian: `sudo apt install ffmpeg`
 * Windows: `winget install ffmpeg`
 
-
-
 ---
 
 ## 🚀 Quick Start
 
 1. **Clone the repository:**
-```bash
-git clone [https://github.com/your-username/hashscout.git](https://github.com/your-username/hashscout.git)
-cd hashscout
+   ```bash
+   git clone https://github.com/mohamed-bouri/hashscout.git
+   cd hashscout
+   ```
 
-```
+2. **Run a dry-run scan:**
+   ```bash
+   python3 hashscout.py -p ~/Videos --video-only
+   ```
 
-
-2. **Run a Dry-Run Scan:**
-```bash
-python hashscout.py -p ~/Videos --video-only
-
-```
-
-
-3. **Run Interactive Deletion Mode:**
-```bash
-python hashscout.py -p ~/Videos --video-only --apply
-
-```
-
-
+3. **Run interactive deletion mode:**
+   ```bash
+   python3 hashscout.py -p ~/Videos --video-only --apply
+   ```
 
 ---
 
@@ -110,7 +105,3 @@ Select file to KEEP > 1
 ## 📄 License
 
 Distributed under the **MIT License**. See `LICENSE` for details.
-
-```
-
-```
