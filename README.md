@@ -9,7 +9,8 @@
 |     | .'|_ -|   |__   |  _| . | | |  _|
 |__|__|__,|___|_|_|_____|___|___|___|_|  
                                          
-   [Smart Video & Bit-Exact Duplicate Finder]
+[Smart Video & Bit-Exact Duplicate Finder]
+            BY Mohamed BOURI
 
 ```
 
