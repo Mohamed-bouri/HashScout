@@ -19,7 +19,7 @@ VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m
 BANNER = r"""
  _  _         _    ___              _   
 | || |__ _ __| |_ / __| __ ___ _  _| |_ 
-| __ / _` (_-< ' \__ \/ _/ _ \ || |  _|
+| __ / _` (_-< '  \__ \/ _/ _ \ || |  _|
 |_||_\__,_/__/_||_|___/\__\___/\_,_|\__|
    [Smart Video & Bit-Exact Duplicate Finder by Mohamed BOURI]
 """
