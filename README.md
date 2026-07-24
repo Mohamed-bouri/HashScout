@@ -16,7 +16,7 @@
 
 ---
 
-## ⚡ Features
+##  Features
 
 * **Multi-Stage Hashing Pipeline:** Extremely fast. Filters candidate files by byte size, partial head/tail hashes, and full SHA-256 bit-exact verification.
 * **Video Duration Extraction:** Automatically queries video runtime via `ffprobe` to give clear context when selecting copies.
@@ -25,13 +25,13 @@
 
 ---
 
-## ⚠️ Deletion Is Permanent
+##  Deletion Is Permanent
 
 HashScout deletes files with `os.unlink()` — there is **no trash/recycle bin, and no undo**. Always run without `--apply` first and read the preview carefully. For anything irreplaceable, keep a backup before you run deletion mode.
 
 ---
 
-## 🛠️ Requirements
+##  Requirements
 
 * **Python 3.10+**
 * **FFmpeg/FFprobe** *(Optional, used for extracting video runtimes)*:
@@ -41,7 +41,7 @@ HashScout deletes files with `os.unlink()` — there is **no trash/recycle bin, 
 
 ---
 
-## 🚀 Quick Start
+##  Quick Start
 
 1. **Clone the repository:**
    ```bash
@@ -61,7 +61,7 @@ HashScout deletes files with `os.unlink()` — there is **no trash/recycle bin, 
 
 ---
 
-## 📖 CLI Flags
+##  CLI Flags
 
 | Short | Long | Description |
 | --- | --- | --- |
@@ -71,7 +71,7 @@ HashScout deletes files with `os.unlink()` — there is **no trash/recycle bin, 
 
 ---
 
-## 💻 Example Terminal Output
+##  Example Terminal Output
 
 ```text
 [*] Total files scanned: 1420
