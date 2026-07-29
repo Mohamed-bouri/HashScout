@@ -1,0 +1,10 @@
+# HashScout v2.0 - Optional Dependencies
+# Core functionality uses Python standard library only.
+#
+# Optional: Trash-safe deletion (moves to Recycle Bin/Trash)
+send2trash>=1.8.0
+#
+# Optional: For video duration analysis, install FFmpeg system-wide:
+#   Ubuntu/Debian: sudo apt install ffmpeg
+#   macOS: brew install ffmpeg
+#   Windows: choco install ffmpeg
