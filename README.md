@@ -478,14 +478,19 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 # HashScout
 
 ```text
-                                         
- __ __         _   _____             _   
-|  |  |___ ___| |_|   __|___ ___ _ _| |_ 
-|     | .'|_ -|   |__   |  _| . | | |  _|
-|__|__|__,|___|_|_|_____|___|___|___|_|  
-                                         
-[Smart Video & Bit-Exact Duplicate Finder]
-            BY Mohamed BOURI
+    =/\                 /\=
+    / \'._   (\_/)   _.'/ \
+   / .''._'--(o.o)--'_.''. \
+  /.' _/ |`'=/ " \='`| \_ `.\
+ /` .' `\;-,'\___/',-;/` '. '\
+/.-'       `\(-V-)/`       `-.\
+`            "   "
+      _  _         _    
+     | || |__ _ __| |_ 
+     | __ / _` (_-< '  \
+     |_||_\__,_/__/_||_|Scout
+Smart Video & Bit-Exact Duplicate 
+   Finder by Mohamed BOURI
 
 ```
 
