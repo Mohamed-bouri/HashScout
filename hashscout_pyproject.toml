@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hashscout"
+version = "2.0.0"
+description = "Advanced duplicate file and video finder with smart auto-cleanup"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Mohamed BOURI"}
+]
+keywords = [
+    "duplicate-finder",
+    "deduplication",
+    "file-management",
+    "video-analysis",
+    "sha256",
+    "cleanup",
+    "storage-management"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Filesystems",
+    "Topic :: Utilities",
+]
+
+[project.optional-dependencies]
+trash = ["send2trash>=1.8.0"]
+
+[project.scripts]
+hashscout = "hashscout_v2:main"
+
+[project.urls]
+Homepage = "https://github.com/Mohamed-bouri/hashscout"
+Repository = "https://github.com/Mohamed-bouri/hashscout"
+Issues = "https://github.com/Mohamed-bouri/hashscout/issues"
+
+[tool.setuptools]
+py-modules = ["hashscout_v2"]
