@@ -424,9 +424,8 @@ hashscout/
 ├── hashscout_v2.py      # Main application
 ├── pyproject.toml       # Package configuration
 ├── requirements.txt     # Optional dependencies
-├── README.md            # This file
-└── tests/
-    └── test_hashscout.py
+└── README.md            # This file
+ 
 ```
 
 ---
