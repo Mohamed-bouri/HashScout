@@ -38,14 +38,22 @@ VIDEO_EXTENSIONS = {
 }
 
 BANNER = r"""
- _  _         _    ___              _   
-| || |__ _ __| |_ / __| __ ___ _  _| |_ 
-| __ / _` (_-< '  \__ \/ _/ _ \ || |  _|
-|_||_\__,_/__/_||_|___/\__\___/\_,_|\__|
-         Smart Duplicate & Video Finder v2.2
-              by Mohamed BOURI
+    =/\                 /\=
+    / \'._   (\_/)   _.'/ \
+   / .''._'--(o.o)--'_.''. \
+  /.' _/ |`'=/ " \='`| \_ `.\
+ /` .' `\;-,'\___/',-;/` '. '\
+/.-'       `\(-V-)/`       `-.\
+`      _  _  "   "  _    
+      | || |__ _ __| |_ 
+      | __ / _` (_-< '  \
+      |_||_\__,_/__/_||_|Scout
+Smart Video & Bit-Exact Duplicate 
+   Finder by Mohamed BOURI
 
-Type 'help' or '?' to list commands. Type 'exit' to quit.
+Type 'help' or '?' to list commands. 
+Type 'exit' to quit.
+contact@mbeffects.com for more help :-)
 """
 
 PROMPT = "\033[92mHashScout>\033[0m "
