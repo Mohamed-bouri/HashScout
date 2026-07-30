@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict, field
@@ -51,8 +52,9 @@ BANNER = r"""
 Smart Video & Bit-Exact Duplicate 
    Finder by Mohamed BOURI
 
-
-Type 'help' or '?' to list commands. Type 'exit' to quit.
+Type 'help' or '?' to list commands. 
+Type 'exit' to quit.
+contact@mbeffects.com for more help :-)
 """
 
 PROMPT = "\033[92mHashScout>\033[0m "
@@ -83,6 +85,7 @@ class FileInfo:
     partial_hash: Optional[str] = None
     duration: Optional[float] = None
     is_video: bool = False
+    video_phash: Optional[List[str]] = None  # perceptual hash per sampled frame
 
     def to_dict(self) -> dict:
         return {
@@ -111,6 +114,26 @@ class DuplicateGroup:
             self.drives_involved = {f.drive for f in self.files if f.drive}
 
 
+@dataclass
+class FuzzyDuplicateGroup:
+    """Videos that are probably the same content but NOT byte-identical
+    (different size/bitrate/resolution/container). Matched by duration +
+    perceptual frame hashing rather than exact hash, so these are
+    probabilistic -- always review before deleting."""
+    files: List[FileInfo] = field(default_factory=list)
+    similarity: float = 0.0   # average perceptual match, 0-100%
+    total_size: int = 0
+    wasted_size: int = 0
+    drives_involved: Set[str] = field(default_factory=set)
+
+    def __post_init__(self):
+        if self.files:
+            self.total_size = sum(f.size for f in self.files)
+            # Assumes you'd keep the largest/highest-quality copy
+            self.wasted_size = self.total_size - max(f.size for f in self.files)
+            self.drives_involved = {f.drive for f in self.files if f.drive}
+
+
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
@@ -133,6 +156,15 @@ def format_duration(seconds: Optional[float]) -> str:
     if h > 0:
         return f"{h:02d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
+
+
+def hamming_distance(hash1: str, hash2: str) -> int:
+    """Bit difference between two hex perceptual hashes. 0 = identical frame,
+    higher = more different. imagehash.phash defaults to a 64-bit hash."""
+    try:
+        return bin(int(hash1, 16) ^ int(hash2, 16)).count("1")
+    except (ValueError, TypeError):
+        return 64
 
 
 def parse_size(size_str: str) -> int:
@@ -197,6 +229,7 @@ class HashScoutCore:
         self.workers = workers
         self.quick_mode = quick_mode
         self._ffprobe_available: Optional[bool] = None
+        self._ffmpeg_available: Optional[bool] = None
 
     def _should_ignore(self, path: Path, base_dir: Path) -> bool:
         try:
@@ -374,6 +407,156 @@ class HashScoutCore:
         groups.sort(key=lambda g: g.wasted_size, reverse=True)
         return groups
 
+    # ---------------------------------------------------------------- #
+    # Fuzzy video matching (same content, different size/bitrate/format)
+    # ---------------------------------------------------------------- #
+
+    def _has_ffmpeg(self) -> bool:
+        if self._ffmpeg_available is not None:
+            return self._ffmpeg_available
+        try:
+            subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            self._ffmpeg_available = True
+        except Exception:
+            self._ffmpeg_available = False
+        return self._ffmpeg_available
+
+    def _extract_frame_phashes(self, path: Path, num_frames: int = 5) -> Optional[List[str]]:
+        """Sample num_frames evenly across the video and return a perceptual
+        hash per frame. Skips a small margin at the start/end to avoid
+        intro logos / black frames throwing off the match."""
+        duration = self._get_video_duration(path)
+        if not duration or duration <= 1:
+            return None
+        try:
+            import imagehash
+            from PIL import Image
+        except ImportError:
+            return None
+
+        margin = min(duration * 0.05, 3.0)
+        span = max(duration - 2 * margin, 0.1)
+        if num_frames <= 1:
+            timestamps = [duration / 2]
+        else:
+            timestamps = [margin + span * i / (num_frames - 1) for i in range(num_frames)]
+
+        hashes: List[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for i, ts in enumerate(timestamps):
+                out_file = Path(tmpdir) / f"frame_{i}.jpg"
+                try:
+                    subprocess.run(
+                        ["ffmpeg", "-ss", f"{ts:.2f}", "-i", str(path), "-frames:v", "1",
+                         "-q:v", "3", "-y", str(out_file)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
+                    )
+                    if out_file.exists() and out_file.stat().st_size > 0:
+                        with Image.open(out_file) as img:
+                            hashes.append(str(imagehash.phash(img)))
+                except Exception:
+                    continue
+        return hashes if hashes else None
+
+    def find_fuzzy_video_duplicates(self, infos: List[FileInfo], duration_tolerance: float = 2.0,
+                                     num_frames: int = 5, phash_threshold: int = 10) -> List[FuzzyDuplicateGroup]:
+        """Find videos that are probably the same content despite different
+        bytes/size (re-encoded, different bitrate/resolution/container).
+        Two-stage: cheap duration bucketing narrows candidates, then
+        perceptual frame hashing confirms. Results are probabilistic --
+        callers should treat them as review-only, never auto-delete."""
+        videos = [i for i in infos if i.is_video and i.duration is not None and i.duration > 0]
+        if len(videos) < 2:
+            return []
+
+        try:
+            import imagehash  # noqa: F401
+            from PIL import Image  # noqa: F401
+        except ImportError:
+            print("[!] Fuzzy video matching needs 'Pillow' and 'imagehash'.")
+            print("    Install with: pip install Pillow imagehash")
+            return []
+
+        if not self._has_ffmpeg():
+            print("[!] Fuzzy video matching needs full ffmpeg (frame extraction), not just ffprobe.")
+            return []
+
+        videos.sort(key=lambda f: f.duration)
+        n = len(videos)
+
+        candidate_pairs: List[Tuple[int, int]] = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                if videos[j].duration - videos[i].duration > duration_tolerance:
+                    break
+                candidate_pairs.append((i, j))
+
+        if not candidate_pairs:
+            return []
+
+        needed_idx = sorted({idx for pair in candidate_pairs for idx in pair})
+        print(f"[*] Fuzzy match: {len(needed_idx)} candidate video(s) within duration tolerance, "
+              f"fingerprinting frames...")
+
+        def _compute(idx: int) -> None:
+            info = videos[idx]
+            if info.video_phash is None:
+                info.video_phash = self._extract_frame_phashes(info.path, num_frames)
+
+        with ThreadPoolExecutor(max_workers=self.workers) as ex:
+            futures = [ex.submit(_compute, idx) for idx in needed_idx]
+            done = 0
+            for _ in as_completed(futures):
+                done += 1
+                if done % 5 == 0 or done == len(futures):
+                    print(f"    Fingerprinted: {done}/{len(futures)}...", end="\r")
+        print()
+
+        # Union-find to merge transitively-matched videos into groups
+        parent = list(range(n))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        pair_similarity: Dict[Tuple[int, int], float] = {}
+        for i, j in candidate_pairs:
+            hi, hj = videos[i].video_phash, videos[j].video_phash
+            if not hi or not hj:
+                continue
+            k = min(len(hi), len(hj))
+            if k == 0:
+                continue
+            avg_dist = sum(hamming_distance(hi[x], hj[x]) for x in range(k)) / k
+            if avg_dist <= phash_threshold:
+                union(i, j)
+                pair_similarity[(i, j)] = max(0.0, 100.0 * (1 - avg_dist / 64.0))
+
+        clusters: Dict[int, List[int]] = {}
+        for idx in range(n):
+            if videos[idx].video_phash is None:
+                continue
+            clusters.setdefault(find(idx), []).append(idx)
+
+        groups: List[FuzzyDuplicateGroup] = []
+        for members in clusters.values():
+            if len(members) < 2:
+                continue
+            files = [videos[m] for m in members]
+            sims = [v for (a, b), v in pair_similarity.items() if a in members and b in members]
+            avg_sim = sum(sims) / len(sims) if sims else 0.0
+            groups.append(FuzzyDuplicateGroup(files=files, similarity=avg_sim))
+
+        groups.sort(key=lambda g: g.wasted_size, reverse=True)
+        return groups
+
 
 # ---------------------------------------------------------------------------
 # Output Formatters
@@ -434,6 +617,27 @@ class OutputFormatter:
             ],
         }
         return json.dumps(data, indent=2)
+
+    @staticmethod
+    def fuzzy_detailed(groups: List[FuzzyDuplicateGroup]) -> str:
+        if not groups:
+            return "[+] No fuzzy (same-content, different-size) video duplicates found."
+        lines = ["\n" + "#" * 60, "  PROBABLE VIDEO DUPLICATES (perceptual match, not exact)", "#" * 60]
+        for i, g in enumerate(groups, 1):
+            drives_str = ", ".join(sorted(g.drives_involved))
+            lines.append(f"\n--- [ Fuzzy Group {i} / {len(groups)} ] ~{g.similarity:.0f}% match ---")
+            lines.append(f"Drives: {drives_str} | Potential savings: {format_size(g.wasted_size)}")
+            for j, f in enumerate(g.files, 1):
+                dur = f" | {format_duration(f.duration)}" if f.duration else ""
+                mod = datetime.fromtimestamp(f.mtime).strftime("%Y-%m-%d %H:%M")
+                lines.append(f"  [{j}] [{f.drive}] {f.path.name} ({format_size(f.size)}{dur})")
+                lines.append(f"      Path: {f.path} | Modified: {mod}")
+        total = sum(g.wasted_size for g in groups)
+        lines.append(f"\n{'='*60}")
+        lines.append("NOTE: These matched by duration + frame fingerprint, not byte-for-byte.")
+        lines.append("Review before deleting -- 'clean' does not touch these groups.")
+        lines.append(f"Potential additional savings: {format_size(total)}")
+        return "\n".join(lines)
 
     @staticmethod
     def csv_out(groups: List[DuplicateGroup]) -> str:
@@ -522,6 +726,8 @@ class HashScoutShell(cmd.Cmd):
         super().__init__()
         self.current_dirs: List[Path] = [Path(".").resolve()]
         self.last_groups: List[DuplicateGroup] = []
+        self.last_infos: List[FileInfo] = []
+        self.last_fuzzy_groups: List[FuzzyDuplicateGroup] = []
         self.default_workers = 4
         self.default_trash = True
         self.default_exclude: List[str] = []
@@ -565,12 +771,23 @@ class HashScoutShell(cmd.Cmd):
 
     def do_scan(self, arg):
         r"""
-        scan <path1> [path2] [path3] [--video] [--quick] [--min-size 10MB] [--max-size 1GB] [--workers 4]
+        scan <path1> [path2] [path3] [--video] [--quick] [--fuzzy] [--min-size 10MB] [--max-size 1GB] [--workers 4]
         Scan one or multiple directories/drives for duplicates.
+
+        --fuzzy                 Also find videos that are the SAME content
+                                 but a DIFFERENT size (re-encoded, trimmed,
+                                 different bitrate/resolution/container).
+                                 Matches by duration + perceptual frame
+                                 hashing. Needs ffmpeg + Pillow + imagehash.
+        --fuzzy-tolerance N      Max duration difference in seconds (default 2)
+        --fuzzy-frames N         Frames sampled per video (default 5)
+        --fuzzy-threshold N      Max avg hash distance to count as a match,
+                                 0-64, lower = stricter (default 10)
         Examples:
           scan C:\Users\Admin\Pictures
           scan C:\ D:\ E:\ --video
           scan ~/Downloads ~/Videos ~/Backups --workers 8
+          scan ~/Videos --video --fuzzy
         """
         if not arg.strip():
             print("[-] Usage: scan <path> [more paths...] [options]")
@@ -585,9 +802,13 @@ class HashScoutShell(cmd.Cmd):
 
         video_only = "--video" in parts or "-v" in parts
         quick = "--quick" in parts or "-q" in parts
+        fuzzy = "--fuzzy" in parts
         workers = self.default_workers
         min_sz = 0
         max_sz = 0
+        fuzzy_tolerance = 2.0
+        fuzzy_frames = 5
+        fuzzy_threshold = 10
 
         for i, p in enumerate(parts):
             if p in ("--workers", "-w") and i + 1 < len(parts):
@@ -596,6 +817,12 @@ class HashScoutShell(cmd.Cmd):
                 min_sz = parse_size(parts[i + 1])
             if p in ("--max-size", "-max") and i + 1 < len(parts):
                 max_sz = parse_size(parts[i + 1])
+            if p == "--fuzzy-tolerance" and i + 1 < len(parts):
+                fuzzy_tolerance = float(parts[i + 1])
+            if p == "--fuzzy-frames" and i + 1 < len(parts):
+                fuzzy_frames = int(parts[i + 1])
+            if p == "--fuzzy-threshold" and i + 1 < len(parts):
+                fuzzy_threshold = int(parts[i + 1])
 
         core = self._make_core(targets, video_only, min_sz, max_sz, quick, workers)
         file_tuples = core.discover()
@@ -604,8 +831,48 @@ class HashScoutShell(cmd.Cmd):
             return
 
         infos = core.analyze_files(file_tuples)
+        self.last_infos = infos
         self.last_groups = core.find_duplicates(infos)
         self._show_groups(self.last_groups)
+
+        if fuzzy:
+            self._run_fuzzy(core, fuzzy_tolerance, fuzzy_frames, fuzzy_threshold)
+
+    def _run_fuzzy(self, core: HashScoutCore, tolerance: float, frames: int, threshold: int):
+        """Run fuzzy video matching over the last scan's files, skipping
+        anything already caught by exact-hash matching."""
+        exact_paths = {f.path for g in self.last_groups for f in g.files}
+        candidates = [i for i in self.last_infos if i.is_video and i.path not in exact_paths]
+        self.last_fuzzy_groups = core.find_fuzzy_video_duplicates(
+            candidates, duration_tolerance=tolerance, num_frames=frames, phash_threshold=threshold
+        )
+        print(OutputFormatter.fuzzy_detailed(self.last_fuzzy_groups))
+
+    def do_fuzzy(self, arg):
+        """
+        fuzzy [--tolerance 2] [--frames 5] [--threshold 10]
+        Find videos that are the SAME content but a DIFFERENT file size,
+        among the files from the last 'scan' (run 'scan' first). Matches
+        by duration + perceptual frame hashing -- these are PROBABLE
+        matches, not byte-identical, so review before deleting.
+        'clean' never touches fuzzy groups.
+        """
+        if not self.last_infos:
+            print("[!] No scan results. Run 'scan <path>' first.")
+            return
+
+        parts = arg.split() if arg else []
+        tolerance, frames, threshold = 2.0, 5, 10
+        for i, p in enumerate(parts):
+            if p == "--tolerance" and i + 1 < len(parts):
+                tolerance = float(parts[i + 1])
+            if p == "--frames" and i + 1 < len(parts):
+                frames = int(parts[i + 1])
+            if p == "--threshold" and i + 1 < len(parts):
+                threshold = int(parts[i + 1])
+
+        core = self._make_core(self.current_dirs, workers=self.default_workers)
+        self._run_fuzzy(core, tolerance, frames, threshold)
 
     def do_clean(self, arg):
         """
@@ -812,11 +1079,20 @@ class HashScoutShell(cmd.Cmd):
       --workers N          Thread count
       --min-size 10MB      Minimum file size
       --max-size 1GB       Maximum file size
+      --fuzzy              Also find same-content videos of DIFFERENT size
+                           (re-encoded/trimmed) via duration + frame hash
 
       Examples:
         scan C:\\Users\\Admin\\Pictures
         scan C:\\ D:\\ E:\\ --video
         scan ~/Downloads ~/Videos ~/Backups --workers 8
+        scan ~/Videos --video --fuzzy
+
+  fuzzy [opts]              Find same-content/different-size video
+                             duplicates from the last scan
+      --tolerance N          Max duration difference, seconds (default 2)
+      --frames N             Frames sampled per video (default 5)
+      --threshold N          Match strictness, 0-64 (default 10)
 
   clean [opts]             Clean duplicates from last scan
       --strategy <name>    newest | oldest | largest | smallest |
@@ -869,6 +1145,11 @@ Examples:
     parser.add_argument("--max-size", type=str, default="", help="Maximum file size")
     parser.add_argument("--exclude", action="append", help="Glob ignore pattern (repeatable)")
     parser.add_argument("--quick", action="store_true", help="Skip full hash (faster)")
+    parser.add_argument("--fuzzy", action="store_true",
+                        help="Also find same-content videos of different size (re-encoded/trimmed)")
+    parser.add_argument("--fuzzy-tolerance", type=float, default=2.0, help="Max duration diff in seconds (default: 2)")
+    parser.add_argument("--fuzzy-frames", type=int, default=5, help="Frames sampled per video (default: 5)")
+    parser.add_argument("--fuzzy-threshold", type=int, default=10, help="Match strictness, 0-64 (default: 10)")
     parser.add_argument("--format", choices=["table", "detailed", "json", "csv"], default="detailed",
                         help="Output format (default: detailed)")
 
@@ -944,7 +1225,18 @@ def run_cli():
             print(fmt.json_out(groups))
         elif args.format == "csv":
             print(fmt.csv_out(groups))
-        sys.exit(1 if groups else 0)
+
+        fuzzy_groups: List[FuzzyDuplicateGroup] = []
+        if args.fuzzy:
+            exact_paths = {f.path for g in groups for f in g.files}
+            candidates = [i for i in infos if i.is_video and i.path not in exact_paths]
+            fuzzy_groups = core.find_fuzzy_video_duplicates(
+                candidates, duration_tolerance=args.fuzzy_tolerance,
+                num_frames=args.fuzzy_frames, phash_threshold=args.fuzzy_threshold,
+            )
+            print(fmt.fuzzy_detailed(fuzzy_groups))
+
+        sys.exit(1 if (groups or fuzzy_groups) else 0)
 
     elif args.command == "export":
         file_tuples = core.discover()
