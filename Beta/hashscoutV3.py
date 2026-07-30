@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HashScout v2.2 - Advanced Duplicate File & Video Finder
+HashScout v2.2.1 - Advanced Duplicate File & Video Finder
 Multi-drive scanning, cross-volume deduplication, smart auto-cleanup,
 forensic reporting, and interactive shell mode.
 By Mohamed BOURI
@@ -31,7 +31,7 @@ from typing import Dict, List, Optional, Tuple, Any, Set
 # Configuration
 # ---------------------------------------------------------------------------
 APP_NAME = "HashScout"
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv",
     ".webm", ".m4v", ".mpg", ".mpeg", ".3gp", ".ts", ".ogv"
