@@ -43,8 +43,8 @@ resolution) using duration + perceptual frame matching.
 - [Common workflows](#common-workflows)
 - [Troubleshooting](#troubleshooting)
 - [Safety notes](#safety-notes)
-- [Q?]
-- [liecence]
+- [Q?](#Q?)
+- [liecence](#License)
 ---
 
 ## Requirements
