@@ -1,4 +1,4 @@
-# HashScout v2.0
+# HashScout v2.2.0
 
 ```
     =/\                 /\=
