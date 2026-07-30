@@ -15,574 +15,510 @@
 Smart Video & Bit-Exact Duplicate 
    Finder by Mohamed BOURI
 ```
+# HashScout
 
-**Advanced Duplicate File & Video Finder with Smart Auto-Cleanup**
+**Advanced Duplicate File & Video Finder** — multi-drive scanning, cross-volume
+deduplication, smart auto-cleanup, forensic reporting, and an interactive shell.
 
-HashScout finds duplicate files using bit-exact SHA-256 hashing, analyzes video durations, and cleans them up using intelligent strategies — or lets you decide interactively. Built for photographers, video editors, system administrators, and anyone drowning in duplicate data.
+HashScout finds duplicate files by content (not filename), across multiple
+drives/folders at once, and can also spot videos that are the **same content
+saved at a different size** (re-encoded, trimmed, different bitrate or
+resolution) using duration + perceptual frame matching.
 
 ---
 
-## ⚠️ Safety Notice
+## Table of Contents
 
-> **Deletion is opt-in.** HashScout runs in **dry-run mode by default**. You must explicitly pass `--apply` to delete anything. When possible, files are moved to trash instead of permanently deleted.
-
+- [Requirements](#requirements)
+- [Installation](#installation)
+  - [1. Python](#1-python)
+  - [2. FFmpeg / FFprobe](#2-ffmpeg--ffprobe)
+  - [3. Python packages](#3-python-packages)
+  - [Verify everything is installed](#verify-everything-is-installed)
+- [Quick Start](#quick-start)
+- [Two ways to use HashScout](#two-ways-to-use-hashscout)
+- [Command Reference (Interactive Shell)](#command-reference-interactive-shell)
+- [Command Reference (Direct CLI)](#command-reference-direct-cli)
+- [How duplicate detection works](#how-duplicate-detection-works)
+- [Common workflows](#common-workflows)
+- [Troubleshooting](#troubleshooting)
+- [Safety notes](#safety-notes)
+- [Q?]
+- [liecence]
 ---
 
-## Features
+## Requirements
 
-| Feature | Description |
-|---------|-------------|
-| **Bit-Exact SHA-256** | Full cryptographic hashing with optional quick partial-hash mode |
-| **3-Stage Pipeline** | Size → Partial Hash → Full Hash for speed and accuracy |
-| **Multi-Threaded** | Parallel hashing with live progress indicator |
-| **Video-Aware** | Extracts duration via `ffprobe` for video duplicates |
-| **Smart Auto-Cleanup** | 7 keep strategies: newest, oldest, largest, smallest, shortest, longest, first |
-| **Trash-Safe Deletion** | Uses `send2trash` when available; falls back to permanent delete |
-| **Dry-Run by Default** | Preview every action before executing (`--apply` required) |
-| **Size Filters** | `--min-size` and `--max-size` to target specific file ranges |
-| **Glob Exclusions** | `--exclude "*.tmp"` to skip temp files, caches, etc. |
-| **Multi-Format Output** | `detailed` (human), `table` (compact), `json` (automation), `csv` (reports) |
-| **Export Reports** | Save scan results to `.json` or `.csv` without deleting |
-| **CI/CD Exit Codes** | Returns `1` if duplicates found, `0` if clean |
+| Tool | Why it's needed | Required? |
+|---|---|---|
+| Python 3.9+ | Runs the script | Yes |
+| `ffprobe` | Reads video duration | Yes, for video features |
+| `ffmpeg` | Extracts frames for fuzzy video matching | Only for `--fuzzy` / `fuzzy` |
+| `Pillow` (pip) | Opens extracted frames | Only for `--fuzzy` / `fuzzy` |
+| `imagehash` (pip) | Computes perceptual frame hashes | Only for `--fuzzy` / `fuzzy` |
+| `send2trash` (pip) | Sends deleted files to Recycle Bin/Trash instead of permanent delete | Optional but recommended |
+
+If you only care about exact duplicate files (documents, photos, archives,
+etc.) and don't need the fuzzy video matching, you can skip `ffmpeg`,
+`Pillow`, and `imagehash` — the script degrades gracefully and just tells you
+those features aren't available.
 
 ---
 
 ## Installation
-
-### From Source
-
-```bash
-git clone https://github.com/Mohamed-bouri/hashscout.git
+-git clone https://github.com/Mohamed-bouri/hashscout.git
 cd hashscout
-python hashscout_v2.py --help
-```
+python hashscout.py --help
 
-### Install as CLI Command
+### 1. Python
 
-```bash
-pip install -e .
-```
-
-This installs `hashscout` as a system command:
+Check what you have:
 
 ```bash
-hashscout --version
+python3 --version    # Linux/macOS
+python --version     # Windows PowerShell
 ```
 
-### Requirements
+You need 3.9 or newer.
 
-- **Python 3.8+** (standard library only)
-- Optional: `send2trash` for trash-aware deletion
-  ```bash
-  pip install send2trash
-  ```
-- Optional: `ffprobe` (part of FFmpeg) for video duration analysis
-  ```bash
-  # Ubuntu/Debian
-  sudo apt install ffmpeg
+**Windows** — install from [python.org](https://www.python.org/downloads/)
+(check "Add python.exe to PATH" during setup) or via `winget`:
 
-  # macOS
-  brew install ffmpeg
+```powershell
+winget install Python.Python.3.12
+```
 
-  # Windows
-  choco install ffmpeg
-  ```
+**Linux (Debian/Ubuntu)**
+
+```bash
+sudo apt update
+sudo apt install python3 python3-pip
+```
+
+**Linux (Fedora)**
+
+```bash
+sudo dnf install python3 python3-pip
+```
+
+**Linux (Arch)**
+
+```bash
+sudo pacman -S python python-pip
+```
+
+---
+
+### 2. FFmpeg / FFprobe
+
+`ffprobe` ships together with `ffmpeg` in every package below — installing
+one installs both.
+
+**Windows — winget (recommended, built into Windows 10/11)**
+
+```powershell
+winget install ffmpeg
+```
+
+Close and reopen PowerShell afterward so your `PATH` refreshes.
+
+**Windows — Chocolatey** (if you already use it)
+
+```powershell
+choco install ffmpeg
+```
+
+**Windows — Scoop** (if you already use it)
+
+```powershell
+scoop install ffmpeg
+```
+
+**Windows — Manual install**
+
+1. Download a build from [gyan.dev's FFmpeg builds](https://www.gyan.dev/ffmpeg/builds/)
+   (the "essentials" or "full" zip).
+2. Extract it to somewhere like `C:\ffmpeg`.
+3. Add `C:\ffmpeg\bin` to your `PATH`:
+   *Start → "Edit the system environment variables" → Environment Variables
+   → select `Path` under User variables → New → `C:\ffmpeg\bin` → OK.*
+4. Restart PowerShell.
+
+**Linux (Debian/Ubuntu)**
+
+```bash
+sudo apt update
+sudo apt install ffmpeg
+```
+
+**Linux (Fedora)**
+
+```bash
+sudo dnf install ffmpeg
+```
+(If it's not in the default repos, enable [RPM Fusion](https://rpmfusion.org/) first.)
+
+**Linux (Arch)**
+
+```bash
+sudo pacman -S ffmpeg
+```
+
+**macOS (Homebrew)**
+
+```bash
+brew install ffmpeg
+```
+
+---
+
+### 3. Python packages
+
+Install the packages HashScout uses:
+
+```bash
+pip install Pillow imagehash send2trash
+```
+
+On Linux, if `pip` complains about an "externally managed environment", use:
+
+```bash
+pip install --break-system-packages Pillow imagehash send2trash
+```
+
+or install into a virtual environment instead:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install Pillow imagehash send2trash
+```
+
+- **Pillow + imagehash** — required only for `--fuzzy` video matching.
+- **send2trash** — optional. Without it, HashScout falls back to permanent
+  delete when you don't pass `--no-trash`.
+
+---
+
+### Verify everything is installed
+
+```bash
+python3 --version
+ffmpeg -version
+ffprobe -version
+python3 -c "import PIL, imagehash; print('Pillow + imagehash OK')"
+```
+
+(On Windows, use `python` instead of `python3` if that's how it's aliased on
+your system.)
 
 ---
 
 ## Quick Start
 
-### 1. Scan a Directory
-
 ```bash
-hashscout scan ~/Downloads
-```
+# Launch the interactive shell
+python3 hashscout.py
 
-**Example Output:**
-```
-[*] Scanning: /home/user/Downloads
-[*] Analyzing 3,421 files using 4 workers...
-    Progress: 3421/3421 files...
-[*] Full-hash verification stage...
-[+] Analysis complete in 4.2s
-
---- [ Group 1 / 12 ] ---
-Hash: a3f5b7e2... | Size each: 15.50 MB | Wasted: 31.00 MB
-  [1] vacation_pic.jpg
-      Path: /home/user/Downloads/vacation_pic.jpg
-      Modified: 2026-07-15 14:30
-  [2] vacation_pic_copy.jpg
-      Path: /home/user/Downloads/backup/vacation_pic_copy.jpg
-      Modified: 2026-07-20 09:15
-  [3] IMG_4521.jpg
-      Path: /home/user/Downloads/camera/IMG_4521.jpg
-      Modified: 2026-07-15 14:30
-
---- [ Group 2 / 12 ] ---
-Hash: 9c8d2e1a... | Size each: 1.20 GB | Wasted: 1.20 GB
-  [1] movie_2024.mkv
-      Path: /home/user/Downloads/movie_2024.mkv
-      Modified: 2026-06-01 22:00 | 02:15:30
-  [2] movie_2024 (1).mkv
-      Path: /home/user/Downloads/movie_2024 (1).mkv
-      Modified: 2026-06-01 22:00 | 02:15:30
-
-============================================================
-Total wasted space: 4.85 GB
-```
-
-### 2. Scan Videos Only
-
-```bash
-hashscout scan ~/Videos --video-only --format table
-```
-
-**Example Output:**
-```
-GROUP    FILES    SIZE EACH      WASTED         SAMPLE PATH
-------------------------------------------------------------------------------------------
-1        3        1.20 GB        2.40 GB        /home/user/Videos/movie_2024.mkv
-2        2        450.00 MB      450.00 MB      /home/user/Videos/clip_01.mp4
-3        4        25.00 MB       75.00 MB       /home/user/Videos/thumb_01.jpg
-
-Total groups: 3 | Total wasted space: 2.93 GB
-```
-
-### 3. Quick Scan (Partial Hash Only)
-
-```bash
-hashscout scan ~/Downloads --quick --format json
-```
-
-> `--quick` skips full hashing. Faster but slightly less precise. Good for first-pass scans.
-
-### 4. Auto-Clean: Keep Newest, Trash Rest
-
-```bash
-hashscout clean ~/Downloads --strategy keep-newest --trash --apply
-```
-
-**Example Output:**
-```
-[*] Auto-clean strategy: newest | Trash: True | Dry-run: False
-
-[Group] Keeping: vacation_pic.jpg
-  [TRASHED] /home/user/Downloads/backup/vacation_pic_copy.jpg
-  [TRASHED] /home/user/Downloads/camera/IMG_4521.jpg
-
-[Group] Keeping: movie_2024.mkv
-  [TRASHED] /home/user/Downloads/movie_2024 (1).mkv
-
-[+] Cleanup complete. Space saved: 4.85 GB
-```
-
-### 5. Auto-Clean Videos: Keep Shortest Duration
-
-```bash
-hashscout clean ~/Videos --video-only --strategy keep-shortest --trash --apply
-```
-
-### 6. Interactive Manual Cleanup
-
-```bash
-hashscout clean ~/Downloads --interactive --trash --apply
-```
-
-**Example Interaction:**
-```
---- Group 1/12 | Wasted: 31.00 MB ---
-  [1] vacation_pic.jpg (2026-07-15 14:30)
-  [2] vacation_pic_copy.jpg (2026-07-20 09:15)
-  [3] IMG_4521.jpg (2026-07-15 14:30)
-
-Select: number=KEEP that file (delete rest) | s=skip | q=quit
-Keep > 1
-[+] Keeping: vacation_pic.jpg
-    [TRASHED] /home/user/Downloads/backup/vacation_pic_copy.jpg
-    [TRASHED] /home/user/Downloads/camera/IMG_4521.jpg
-```
-
-### 7. Export Report Without Deleting
-
-```bash
-hashscout export ~/Downloads --output duplicates.json
-hashscout export ~/Videos --output report.csv
-```
-
-### 8. Filter by Size
-
-```bash
-# Only files larger than 10MB
-hashscout scan ~/Downloads --min-size 10MB
-
-# Only files between 1MB and 100MB
-hashscout scan ~/Downloads --min-size 1MB --max-size 100MB
-```
-
-### 9. Exclude Patterns
-
-```bash
-hashscout scan ~/Downloads --exclude "*.tmp" --exclude "*.part" --exclude "node_modules/*"
+# Or scan directly from the command line
+python3 hashscout.py scan ~/Downloads ~/Videos --video-only
 ```
 
 ---
 
-## Commands Reference
+## Two ways to use HashScout
+
+**1. Interactive shell** — run `python3 hashscout.py` with no arguments to
+drop into a `HashScout>` prompt where you can `scan`, `fuzzy`, `clean`,
+`export`, etc. across multiple commands without re-scanning each time.
+
+**2. Direct CLI mode** — run `python3 hashscout.py <command> <paths> [options]`
+for one-off scans, e.g. from scripts or scheduled tasks.
+
+Both modes support the same core options; the interactive shell additionally
+remembers your last scan so you can run `fuzzy`, `clean`, or `export` against
+it without re-scanning the disk.
+
+---
+
+## Command Reference (Interactive Shell)
+
+Start the shell:
+
+```bash
+python3 hashscout.py
+```
 
 ### `scan`
 
-Scan a directory and report duplicates.
-
-```bash
-hashscout scan ~/Downloads
-hashscout scan ~/Videos --video-only --format json
-hashscout scan ~/Downloads --quick --min-size 5MB --exclude "*.log"
-hashscout scan . --workers 8 --format csv > report.csv
+```
+scan <path1> [path2] [path3] ... [options]
 ```
 
-**Options:**
-- `--video-only` — Scan only video files
-- `--min-size` — Minimum file size (e.g., `10MB`, `1GB`)
-- `--max-size` — Maximum file size
-- `--exclude` — Glob ignore pattern (repeatable)
-- `--quick` — Skip full hash verification (faster)
-- `--workers` — Hashing threads (default: 4)
-- `--format` — Output: `detailed` (default), `table`, `json`, `csv`
+Scans one or more directories/drives and reports exact duplicate files
+(grouped by content hash, not filename).
 
-**Exit Codes:**
-| Code | Meaning |
-|------|---------|
-| `0` | No duplicates found |
-| `1` | Duplicates found |
+| Option | Description |
+|---|---|
+| `--video`, `-v` | Only scan video files |
+| `--quick`, `-q` | Skip full-file hash verification (faster, slightly less certain) |
+| `--workers N`, `-w N` | Number of hashing threads (default: 4) |
+| `--min-size 10MB` | Skip files smaller than this |
+| `--max-size 1GB` | Skip files larger than this |
+| `--fuzzy` | Also find videos that are the **same content but a different size** (see [How duplicate detection works](#how-duplicate-detection-works)) |
+| `--fuzzy-tolerance N` | Max duration difference in seconds to consider (default: `2`) |
+| `--fuzzy-frames N` | Frames sampled per video for fingerprinting (default: `5`) |
+| `--fuzzy-threshold N` | Match strictness, 0–64, lower = stricter (default: `10`) |
 
----
+Examples:
+
+```
+scan C:\Users\Admin\Pictures
+scan C:\ D:\ E:\ --video
+scan ~/Downloads ~/Videos ~/Backups --workers 8
+scan ~/Videos --video --fuzzy
+```
+
+### `fuzzy`
+
+```
+fuzzy [--tolerance 2] [--frames 5] [--threshold 10]
+```
+
+Re-runs fuzzy video matching against the results of your **last `scan`**,
+without touching the disk again — handy for tuning the tolerance/threshold
+without waiting through a full re-scan. Requires `scan` to have been run
+first in this session.
 
 ### `clean`
 
-Clean up duplicates using auto-strategies or interactive mode.
-
-```bash
-hashscout clean ~/Downloads --strategy keep-newest --trash --apply
-hashscout clean ~/Videos --video-only --strategy keep-shortest --apply
-hashscout clean ~/Downloads --interactive --trash --apply
+```
+clean [--strategy <name>] [--trash] [--no-trash] [--apply] [--interactive]
 ```
 
-**Options:**
-- `--strategy` — Auto-keep strategy (default: `manual`)
-- `--interactive` — Force interactive picker
-- `--trash` — Move to trash instead of permanent delete
-- `--apply` — **Required.** Actually execute deletions
+Cleans up the duplicate groups from your last `scan`. **Only acts on exact
+(hash-based) duplicates — fuzzy video matches are never touched by `clean`.**
 
-> ⚠️ Without `--apply`, `clean` runs in dry-run mode and only previews what it would do.
+| Strategy | Keeps |
+|---|---|
+| `manual` (default) | Prompts you to pick which file to keep, per group |
+| `newest` | Most recently modified file |
+| `oldest` | Oldest file |
+| `largest` | Largest file |
+| `smallest` | Smallest file |
+| `shortest` | Shortest video duration |
+| `longest` | Longest video duration |
+| `first` | First file found |
+| `spread` | One copy per drive (deletes extra copies on the same drive) |
 
-**Strategies:**
+| Option | Description |
+|---|---|
+| `--trash` | Move deleted files to Recycle Bin/Trash (default) |
+| `--no-trash` | Permanently delete instead |
+| `--apply` | Actually delete files. **Without this, it's a dry-run** that only prints what *would* happen |
+| `--interactive`, `-i` | Force the manual picker even with a non-manual strategy |
 
-| Strategy | Keeps | Best For |
-|----------|-------|----------|
-| `keep-newest` | Most recently modified | Keeping latest versions |
-| `keep-oldest` | Earliest modified | Preserving originals |
-| `keep-largest` | Biggest file | Keeping highest quality |
-| `keep-smallest` | Smallest file | Saving disk space |
-| `keep-shortest` | Shortest video | Removing long duplicates |
-| `keep-longest` | Longest video | Keeping full versions |
-| `keep-first` | First found | Fastest cleanup |
-| `manual` | You pick | Full control |
+Examples:
 
----
+```
+clean --strategy spread --trash --apply
+clean --strategy largest --apply
+clean                       # dry-run, manual picker
+```
 
 ### `export`
 
-Export scan results to a file without deleting anything.
-
-```bash
-hashscout export ~/Downloads --output report.json
-hashscout export ~/Videos --output duplicates.csv
+```
+export <filename.json|csv|txt>
 ```
 
-**Options:**
-- `--output, -o` — Output file path (`.json` or `.csv`)
+Exports the last scan's exact-duplicate results to a file. Format is chosen
+by the file extension.
+
+### Other commands
+
+| Command | Description |
+|---|---|
+| `cd <path>` | Change the default scan directory |
+| `pwd` | Show the current default directory |
+| `exclude <pattern>` | Add a glob ignore pattern (e.g. `exclude *.tmp`) |
+| `exclude --list` | List active ignore patterns |
+| `exclude --clear` | Clear all ignore patterns |
+| `workers <N>` | Set the default thread count for future scans |
+| `clear` | Clear the terminal screen |
+| `help` | Show the full command list |
+| `exit` / `quit` | Leave HashScout |
 
 ---
 
-## Global Flags
+## Command Reference (Direct CLI)
 
-| Flag | Description |
-|------|-------------|
-| `--version` | Show version number |
-| `-p, --path` | Target directory (default: current directory) |
-| `--workers` | Number of hashing threads (default: 4) |
+```
+python3 hashscout.py [paths...] <command> [options]
+```
+
+### Global options (apply to `scan`, `clean`, `export`)
+
+| Option | Description |
+|---|---|
+| `--workers N` | Hashing threads (default: 4) |
 | `--video-only` | Scan only video files |
-| `--min-size` | Minimum file size filter |
-| `--max-size` | Maximum file size filter |
-| `--exclude` | Glob ignore pattern (repeatable) |
-| `--quick` | Skip full hash verification |
-| `--format` | Output format: `detailed`, `table`, `json`, `csv` |
-| `-h, --help` | Show help message |
+| `--min-size SIZE` | Minimum file size (e.g. `10MB`, `1GB`) |
+| `--max-size SIZE` | Maximum file size |
+| `--exclude PATTERN` | Glob ignore pattern (repeatable) |
+| `--quick` | Skip full-file hash verification |
+| `--fuzzy` | Also find same-content/different-size video duplicates |
+| `--fuzzy-tolerance N` | Max duration difference in seconds (default: `2`) |
+| `--fuzzy-frames N` | Frames sampled per video (default: `5`) |
+| `--fuzzy-threshold N` | Match strictness, 0–64 (default: `10`) |
+| `--format {table,detailed,json,csv}` | Output format for `scan` (default: `detailed`) |
+| `--version` | Show version and exit |
 
----
+### Subcommands
 
-## Output Formats
+```
+hashscout scan                          # scan and print duplicates
+hashscout clean --strategy <name>       # auto or interactive cleanup
+hashscout export -o report.json         # export scan results
+```
 
-### Detailed (Default)
-Full human-readable report with file paths, modification times, and video durations.
+`clean` subcommand options: `--strategy`, `--interactive`, `--trash`,
+`--no-trash`, `--apply` (same meaning as the shell's `clean` command above).
+
+`export` subcommand options: `-o` / `--output <file>` (required).
+
+### Examples
 
 ```bash
-hashscout scan ~/Videos
+# Scan and print a table
+python3 hashscout.py ~/Downloads scan --format table
+
+# Scan two drives for videos only, including fuzzy matches
+python3 hashscout.py C:\ D:\ scan --video-only --fuzzy
+
+# Auto-clean, keeping one copy per drive, actually delete (to trash)
+python3 hashscout.py D:\Backups clean --strategy spread --apply
+
+# Export a JSON report without deleting anything
+python3 hashscout.py ~/Videos export -o report.json
 ```
 
-### Table
-Compact summary table. Best for quick overviews.
+---
 
+## How duplicate detection works
+
+**Exact duplicates (default, always on):**
+1. Files are grouped by size.
+2. Files sharing a size get a fast *partial* hash (first + last 64KB).
+3. Files that still collide get a *full* SHA-256 hash to confirm.
+
+This only matches files that are byte-for-byte identical — a re-encoded or
+resized copy of a video will **not** match, even though it's "the same video".
+
+**Fuzzy video duplicates (opt-in via `--fuzzy` / `fuzzy`):**
+1. Video files are bucketed by duration — only videos within
+   `--fuzzy-tolerance` seconds of each other are compared further.
+2. For each candidate, `ffmpeg` extracts a handful of evenly-spaced frames
+   (`--fuzzy-frames`), skipping a small margin at the start/end to avoid
+   intro logos or black frames.
+3. Each frame gets a perceptual hash (`imagehash.phash`) that's robust to
+   resolution, bitrate, and format changes.
+4. Videos whose average frame-hash distance is below `--fuzzy-threshold` are
+   grouped together with a similarity percentage.
+
+This is **probabilistic, not exact** — always review a fuzzy group before
+deleting anything. That's also why `clean` never auto-deletes fuzzy matches.
+
+Tuning tips:
+- Getting false positives (unrelated clips grouped together)? Lower
+  `--fuzzy-threshold` (stricter) or `--fuzzy-tolerance`.
+- Missing matches you know exist? Raise `--fuzzy-threshold`, or raise
+  `--fuzzy-frames` for more accuracy (at the cost of speed).
+- Videos with different intros/outros (e.g. trimmed differently) may not
+  match even with the same core content, since frames are sampled at
+  proportional timestamps.
+
+---
+
+## Common workflows
+
+**Find and review exact duplicates in Downloads:**
+```
+scan ~/Downloads
+```
+
+**Find duplicate videos across three drives, including re-encoded copies:**
+```
+scan C:\ D:\ E:\ --video --fuzzy
+```
+
+**Free up space automatically, one copy per drive, straight to Trash:**
+```
+scan D:\Media
+clean --strategy spread --trash --apply
+```
+
+**Just get a report, don't delete anything:**
+```
+scan ~/Photos
+export ~/Desktop/duplicates.json
+```
+
+---
+
+## Troubleshooting
+
+**`ffmpeg is not recognized as an internal or external command` (Windows)**
+`ffmpeg`/`ffprobe` isn't installed or isn't on your `PATH`. See
+[FFmpeg / FFprobe](#2-ffmpeg--ffprobe) above. After installing, close and
+reopen PowerShell.
+
+**`Fuzzy video matching needs 'Pillow' and 'imagehash'`**
 ```bash
-hashscout scan ~/Downloads --format table
+pip install Pillow imagehash
 ```
 
-### JSON
-Machine-parseable with full forensic detail. Best for automation and scripting.
+**`Fuzzy video matching needs full ffmpeg (frame extraction), not just ffprobe`**
+You have `ffprobe` but not `ffmpeg` on `PATH`. They ship together in every
+package above — reinstall via one of the methods in
+[FFmpeg / FFprobe](#2-ffmpeg--ffprobe).
 
+**`pip: error: externally-managed-environment` (Linux)**
 ```bash
-hashscout scan ~/Videos --format json | jq '.groups[0].files[0].path'
+pip install --break-system-packages Pillow imagehash send2trash
 ```
+or use a virtual environment (see [Python packages](#3-python-packages)).
 
-### CSV
-Spreadsheet-friendly. Best for reports and documentation.
+**`SyntaxError: (unicode error) 'unicodeescape' codec can't decode bytes...`**
+This was a bug in older copies of `hashscout.py` where a Windows example
+path (`C:\Users\...`) sat inside a non-raw docstring, and Python tried to
+parse `\U` as a Unicode escape. Fixed in current versions — make sure you're
+running the latest `hashscout.py`.
 
-```bash
-hashscout scan ~/Downloads --format csv > duplicates.csv
-```
+**Scan finds nothing / "No files matched"**
+Check `--min-size` / `--max-size` aren't excluding everything, and that the
+path(s) you passed actually exist and are directories.
 
----
-
-## How It Works
-
-HashScout uses a **3-stage deduplication pipeline** for efficiency:
-
-```
-Stage 1: Size Grouping
-    Group files by exact byte size.
-    Eliminates ~95% of files immediately.
-
-Stage 2: Partial Hash (Head + Tail)
-    Hash first 64KB and last 64KB of each file.
-    Catches most duplicates without reading entire files.
-
-Stage 3: Full SHA-256 Hash
-    Bit-exact verification of remaining candidates.
-    100% accuracy guarantee.
-```
-
-With `--quick`, Stage 3 is skipped for maximum speed.
+**Permission errors during scan**
+HashScout skips unreadable directories and reports how many were skipped.
+Run as Administrator (Windows) or with appropriate permissions (Linux) if
+you need to scan protected locations.
 
 ---
 
-## Deletion Safety
+## Safety notes
 
-| Mode | Behavior |
-|------|----------|
-| **Default (no `--apply`)** | Dry-run only. Nothing is deleted. |
-| `--apply` without `--trash`** | Permanently deletes files. |
-| `--apply --trash`** | Moves to system trash (Recycle Bin). |
+- `clean` defaults to **dry-run** — nothing is deleted unless you pass `--apply`.
+- Deletions go to Trash/Recycle Bin by default (`--trash`); pass `--no-trash`
+  for permanent deletion.
+- `strategy manual` (the default) always asks you which file to keep, per group.
+- Fuzzy video matches are **never** touched by `clean` — they require manual
+  review and deletion.
+  ---
+  
+##  Q?
+- any questions contact me :) contact@mbeffects.com
 
-**Trash support requires:**
-```bash
-pip install send2trash
-```
-
-If `send2trash` is not installed, HashScout warns you and falls back to permanent deletion.
-
----
-
-## Performance Tips
-
-| Scenario | Recommendation |
-|----------|---------------|
-| Huge directories (100k+ files) | Use `--quick` for first pass |
-| Slow HDD / network drives | Reduce `--workers 2` to avoid I/O thrashing |
-| SSD / fast storage | Increase `--workers 8` or `--workers 16` |
-| Only care about big files | Add `--min-size 10MB` |
-| Video collections | Use `--video-only` to skip everything else |
-| Automated scripts | Use `--format json` and check exit code |
-
----
-
-## Video Duration Analysis
-
-HashScout extracts video duration using `ffprobe` (from FFmpeg). This lets you:
-
-- Sort duplicates by length (`keep-shortest`, `keep-longest`)
-- See duration in scan reports
-- Identify truncated or corrupted video copies
-
-If `ffprobe` is not installed, duration shows as `N/A` and video strategies fall back to file metadata.
-
----
-
-## Project Structure
-
-```
-hashscout/
-├── hashscout_v2.py      # Main application
-├── pyproject.toml       # Package configuration
-├── requirements.txt     # Optional dependencies
-└── README.md            # This file
- 
-```
-
----
-
-## Comparison: HashScout v1 vs v2
-
-| Capability | v1.0 | v2.0 |
-|-----------|------|------|
-| SHA-256 hashing | ✅ | ✅ |
-| Multi-threading | ❌ | ✅ |
-| Auto-cleanup strategies | ❌ | ✅ (7 strategies) |
-| Trash-safe deletion | ❌ | ✅ |
-| Dry-run by default | ❌ | ✅ |
-| Size filters | ❌ | ✅ |
-| Glob exclusions | ❌ | ✅ |
-| JSON/CSV output | ❌ | ✅ |
-| Export command | ❌ | ✅ |
-| CI/CD exit codes | ❌ | ✅ |
-| Progress indicator | ❌ | ✅ |
-
----
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/awesome-feature`)
-3. Commit your changes (`git commit -m 'Add awesome feature'`)
-4. Push to the branch (`git push origin feature/awesome-feature`)
-5. Open a Pull Request
-
----
-
-## License
-
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
----
-
-## Related Tools
-
-- **[PortSpy](../portspy/)** — Network port & process auditor
-- **[PyGuard](../pyguard/)** — File integrity monitor with forensic trails
-
----
-
-<p align="center">
-  <i>Find it. Know it. Clean it.</i>
-</p>
-# HashScout
-
-```text
-    =/\                 /\=
-    / \'._   (\_/)   _.'/ \
-   / .''._'--(o.o)--'_.''. \
-  /.' _/ |`'=/ " \='`| \_ `.\
- /` .' `\;-,'\___/',-;/` '. '\
-/.-'       `\(-V-)/`       `-.\
-`            "   "
-      _  _         _    
-     | || |__ _ __| |_ 
-     | __ / _` (_-< '  \
-     |_||_\__,_/__/_||_|Scout
-Smart Video & Bit-Exact Duplicate 
-   Finder by Mohamed BOURI
-
-```
-
-> High-performance duplicate file finder tailored for media libraries, utilizing multi-stage SHA-256 hashing, video duration analysis, and an interactive CLI deletion manager.
-
----
-
-##  Features
-
-* **Multi-Stage Hashing Pipeline:** Extremely fast. Filters candidate files by byte size, partial head/tail hashes, and full SHA-256 bit-exact verification.
-* **Video Duration Extraction:** Automatically queries video runtime via `ffprobe` to give clear context when selecting copies.
-* **Interactive Deletion Prompt:** Choose which copy to keep per duplicate group with real-time feedback.
-* **Safety First:** Default **Dry Run** mode ensures no files are removed without explicit `--apply` flags.
-
----
-
-##  Deletion Is Permanent
-
-HashScout deletes files with `os.unlink()` — there is **no trash/recycle bin, and no undo**. Always run without `--apply` first and read the preview carefully. For anything irreplaceable, keep a backup before you run deletion mode.
-
----
-
-##  Requirements
-
-* **Python 3.10+**
-* **FFmpeg/FFprobe** *(Optional, used for extracting video runtimes)*:
-* macOS: `brew install ffmpeg`
-* Ubuntu/Debian: `sudo apt install ffmpeg`
-* Windows: `winget install ffmpeg`
-
----
-
-##  Quick Start
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/mohamed-bouri/hashscout.git
-   cd hashscout
-   ```
-
-2. **Run a dry-run scan:**
-   ```bash
-   python3 hashscout.py -p ~/Videos --video-only
-   ```
-
-3. **Run interactive deletion mode:**
-   ```bash
-   python3 hashscout.py -p ~/Videos --video-only --apply
-   ```
-
----
-
-##  CLI Flags
-
-| Short | Long | Description |
-| --- | --- | --- |
-| `-p` | `--path` | **(Required)** Path to directory to scan. |
-| `-v` | `--video-only` | Restrict scan strictly to video extensions (`.mp4`, `.mkv`, `.mov`, etc.). |
-| `-a` | `--apply` | Enables interactive prompt to select files for deletion. |
-
----
-
-##  Example Terminal Output
-
-```text
-[*] Total files scanned: 1420
-[*] Stage 1 (Size Check): Found 3 potential duplicate group(s).
-[*] Stage 2 (Partial Hash): Narrowed to 2 group(s).
-[*] Stage 3 (Full Hash): Confirmed 2 bit-exact duplicate group(s).
-
-===========================================================================
- SUMMARY: 2 duplicate sets found.
- WASTED SPACE: ~1.42 GB
-===========================================================================
-
---- [ Group 1 / 2 ] ---
-File Size: 720.50 MB
-  [1] sample_clip.mp4
-      Path: /Users/username/Videos/sample_clip.mp4
-      Modified: 2024-02-10 12:10:00 | Duration: 01:14:30
-  [2] sample_clip_copy.mp4
-      Path: /Users/username/Downloads/sample_clip_copy.mp4
-      Modified: 2024-03-01 09:45:12 | Duration: 01:14:30
-
-Select file to KEEP > 1
-
-[+] Keeping: sample_clip.mp4
-  [DELETED] /Users/username/Downloads/sample_clip_copy.mp4
-
-```
-
----
-
-## 📄 License
+##  License
 
 Distributed under the **MIT License**. See `LICENSE` for details.
