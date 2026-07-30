@@ -1,10 +1,21 @@
-# HashScout v2.0 - Optional Dependencies
-# Core functionality uses Python standard library only.
+# HashScout v2.2 - Optional Dependencies
+# Core functionality (exact duplicate detection) uses Python standard
+# library only. Everything below is optional.
 #
 # Optional: Trash-safe deletion (moves to Recycle Bin/Trash)
 send2trash>=1.8.0
 #
-# Optional: For video duration analysis, install FFmpeg system-wide:
+# Optional: Fuzzy video matching (--fuzzy / fuzzy / fuzzyclean commands) --
+# finds videos that are the SAME content at a DIFFERENT file size
+# (re-encoded, trimmed, different bitrate/resolution). Needs both packages
+# below AND a system-wide FFmpeg install (see next section).
+Pillow>=10.0.0
+imagehash>=4.3.0
+#
+# Optional: For video duration analysis and fuzzy matching, install FFmpeg
+# system-wide (provides both ffprobe and ffmpeg):
 #   Ubuntu/Debian: sudo apt install ffmpeg
-#   macOS: brew install ffmpeg
-#   Windows: choco install ffmpeg
+#   Fedora:        sudo dnf install ffmpeg
+#   Arch:          sudo pacman -S ffmpeg
+#   macOS:         brew install ffmpeg
+#   Windows:       winget install ffmpeg   (or: choco install ffmpeg)
