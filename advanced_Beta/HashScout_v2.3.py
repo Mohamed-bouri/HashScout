@@ -1007,9 +1007,26 @@ class HashScoutShell(cmd.Cmd):
         self.default_skip_system = False
         self.default_cache_file: Optional[str] = None
 
+    # Flags accepted by `scan` that consume the NEXT token as a value
+    # (e.g. "--fuzzy-frames 10") -- these values must not be mistaken for
+    # paths, which is exactly what happened before this fix: "10" isn't a
+    # directory, so it was reported as an invalid path instead of being
+    # recognized as --fuzzy-frames' argument.
+    _SCAN_VALUE_FLAGS = {
+        "--workers", "-w", "--min-size", "-min", "--max-size", "-max",
+        "--fuzzy-tolerance", "--fuzzy-frames", "--fuzzy-threshold", "--cache",
+    }
+
     def _parse_paths(self, args: List[str]) -> List[Path]:
         paths = []
+        skip_next = False
         for a in args:
+            if skip_next:
+                skip_next = False
+                continue
+            if a in self._SCAN_VALUE_FLAGS:
+                skip_next = True
+                continue
             if a.startswith("-"):
                 continue
             p = Path(a).expanduser().resolve()
