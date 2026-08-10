@@ -42,6 +42,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat as stat_module
 import subprocess
 import sys
 import shlex
@@ -74,6 +75,19 @@ DEFAULT_SYSTEM_IGNORE = [
     ".Trash*", ".Trashes", ".fseventsd", ".Spotlight-V100",
     ".DocumentRevisions-V100",
 ]
+
+# Bytes read per I/O call while hashing. 1MB instead of the old 64KB cuts
+# syscall count ~16x on large files (a 10GB video drops from ~160,000
+# read() calls to ~10,000) -- this matters a lot on network/USB drives
+# where each syscall has real round-trip latency, and it's still tiny
+# next to typical video file sizes.
+READ_CHUNK_SIZE = 1024 * 1024
+
+# Sensible default thread count: enough to keep several files' I/O in
+# flight at once (hashing is I/O-bound, so more threads than cores helps
+# up to a point), but capped so a huge machine doesn't try to hammer a
+# single spinning disk with dozens of concurrent seeks.
+DEFAULT_WORKERS = min(8, max(4, os.cpu_count() or 4))
 
 BANNER = r"""
     =/\                 /\=
@@ -258,7 +272,7 @@ class HashScoutCore:
     def __init__(self, target_dirs: List[Path], video_only: bool = False,
                  min_size: int = 0, max_size: int = 0,
                  exclude_patterns: Optional[List[str]] = None,
-                 workers: int = 4, quick_mode: bool = False,
+                 workers: int = DEFAULT_WORKERS, quick_mode: bool = False,
                  include_empty: bool = False, skip_system: bool = False,
                  cache_file: Optional[str] = None):
         self.target_dirs = [d.resolve() for d in target_dirs if d.exists() and d.is_dir()]
@@ -357,16 +371,32 @@ class HashScoutCore:
                 return True
         return False
 
-    def discover(self) -> List[Tuple[Path, Path]]:
-        """Return list of (file_path, base_dir) tuples."""
-        results: List[Tuple[Path, Path]] = []
+    def discover(self) -> List[Tuple[Path, Path, os.stat_result]]:
+        """Return list of (file_path, base_dir, stat_result) tuples.
+
+        stat() is captured exactly once here and threaded through the rest
+        of the pipeline (cache lookup, size pre-filtering, hashing, FileInfo
+        construction) instead of every stage re-stating the same file --
+        that alone removes 2-3 redundant syscalls per file, which adds up
+        fast on network/removable drives where each syscall is a real
+        round trip.
+
+        When multiple target directories are given (e.g. scanning several
+        drives at once), each is walked on its own thread. Directory
+        listing and stat() calls block on I/O and release the GIL, so
+        walking N physically-separate drives concurrently is a genuine
+        speedup, not just concurrency theater."""
         skipped: List[str] = []
         skipped_empty = 0
 
-        def _on_error(err: OSError) -> None:
-            skipped.append(getattr(err, "filename", None) or str(err))
+        def _walk_one(base_dir: Path) -> Tuple[List[Tuple[Path, Path, os.stat_result]], List[str], int]:
+            local_results: List[Tuple[Path, Path, os.stat_result]] = []
+            local_skipped: List[str] = []
+            local_empty = 0
 
-        for base_dir in self.target_dirs:
+            def _on_error(err: OSError) -> None:
+                local_skipped.append(getattr(err, "filename", None) or str(err))
+
             for root, dirs, names in os.walk(base_dir, onerror=_on_error):
                 root_path = Path(root)
                 # Prune ignored directories in place so os.walk never even
@@ -384,19 +414,39 @@ class HashScoutCore:
                     if self._should_ignore(fpath, base_dir):
                         continue
                     try:
-                        if not fpath.is_file():
+                        st = fpath.stat()
+                        # Reuse the stat we already paid for instead of
+                        # calling is_file() (which would silently stat()
+                        # the path again under the hood).
+                        if not stat_module.S_ISREG(st.st_mode):
                             continue
-                        sz = fpath.stat().st_size
+                        sz = st.st_size
                         if sz == 0 and not self.include_empty:
-                            skipped_empty += 1
+                            local_empty += 1
                             continue
                         if self.min_size and sz < self.min_size:
                             continue
                         if self.max_size and sz > self.max_size:
                             continue
-                        results.append((fpath, base_dir))
+                        local_results.append((fpath, base_dir, st))
                     except OSError:
                         continue
+
+            return local_results, local_skipped, local_empty
+
+        results: List[Tuple[Path, Path, os.stat_result]] = []
+        if len(self.target_dirs) > 1:
+            with ThreadPoolExecutor(max_workers=min(len(self.target_dirs), 8)) as ex:
+                for local_results, local_skipped, local_empty in ex.map(_walk_one, self.target_dirs):
+                    results.extend(local_results)
+                    skipped.extend(local_skipped)
+                    skipped_empty += local_empty
+        else:
+            for base_dir in self.target_dirs:
+                local_results, local_skipped, local_empty = _walk_one(base_dir)
+                results.extend(local_results)
+                skipped.extend(local_skipped)
+                skipped_empty += local_empty
 
         if skipped:
             label = "directory" if len(skipped) == 1 else "directories"
@@ -450,14 +500,13 @@ class HashScoutCore:
             pass
         return None
 
-    def _hash_file(self, path: Path, partial: bool = False,
+    def _hash_file(self, path: Path, known_size: int, partial: bool = False,
                     compute_duration: bool = True) -> Optional[Tuple[str, Optional[float]]]:
         try:
             hasher = hashlib.sha256()
-            size = path.stat().st_size
-            chunk = 64 * 1024
+            chunk = READ_CHUNK_SIZE
             with open(path, "rb") as f:
-                if partial and size > chunk * 2:
+                if partial and known_size > chunk * 2:
                     hasher.update(f.read(chunk))
                     f.seek(-chunk, os.SEEK_END)
                     hasher.update(f.read(chunk))
@@ -473,7 +522,7 @@ class HashScoutCore:
         except (OSError, PermissionError):
             return None
 
-    def analyze_files(self, file_tuples: List[Tuple[Path, Path]]) -> List[FileInfo]:
+    def analyze_files(self, file_tuples: List[Tuple[Path, Path, os.stat_result]]) -> List[FileInfo]:
         infos: List[FileInfo] = []
         total = len(file_tuples)
         cache_hits = 0
@@ -484,12 +533,8 @@ class HashScoutCore:
         # Stage 0: satisfy anything the persistent cache already has a
         # verified full hash for (same path + size + mtime as last time),
         # skipping disk I/O entirely for unchanged files.
-        to_hash: List[Tuple[Path, Path]] = []
-        for fpath, base_dir in file_tuples:
-            try:
-                st = fpath.stat()
-            except OSError:
-                continue
+        pending: List[Tuple[Path, Path, os.stat_result]] = []
+        for fpath, base_dir, st in file_tuples:
             entry = self._cache_lookup(fpath, st.st_size, st.st_mtime)
             if entry:
                 cache_hits += 1
@@ -503,19 +548,73 @@ class HashScoutCore:
                     is_video=fpath.suffix.lower() in VIDEO_EXTENSIONS,
                 ))
             else:
-                to_hash.append((fpath, base_dir))
+                pending.append((fpath, base_dir, st))
 
         if cache_hits:
             print(f"[*] {cache_hits}/{total} file(s) unchanged since the last cached scan -- reused stored hashes.")
 
-        # Stage 1: cheap partial hash (first+last 64KB) for everything else.
+        # Stage 0.5: size pre-filter. A file can only be a byte-for-byte
+        # duplicate of something the exact same size, so any file whose
+        # size doesn't match ANY other file in this scan -- cache hits
+        # included -- mathematically cannot be part of a duplicate group.
+        # There's no reason to read a single byte of it. Most media
+        # libraries have mostly-distinct file sizes, so this alone
+        # eliminates the bulk of the I/O a naive "hash everything" scan
+        # would otherwise do.
+        size_counts: Dict[int, int] = {}
+        for _, _, st in file_tuples:
+            size_counts[st.st_size] = size_counts.get(st.st_size, 0) + 1
+
+        to_hash: List[Tuple[Path, Path, os.stat_result]] = []
+        unique_non_video: List[Tuple[Path, Path, os.stat_result]] = []
+        unique_video: List[Tuple[Path, Path, os.stat_result]] = []
+        for fpath, base_dir, st in pending:
+            if size_counts.get(st.st_size, 0) > 1:
+                to_hash.append((fpath, base_dir, st))
+            elif fpath.suffix.lower() in VIDEO_EXTENSIONS:
+                unique_video.append((fpath, base_dir, st))
+            else:
+                unique_non_video.append((fpath, base_dir, st))
+
+        skipped_unique = len(unique_non_video) + len(unique_video)
+        if skipped_unique:
+            print(f"[*] {skipped_unique} file(s) have a one-of-a-kind size -- skipped hashing (can't have an exact duplicate).")
+
+        # Unique-size, non-video: nothing else needs them hashed OR probed
+        # for duration -- just record them.
+        for fpath, base_dir, st in unique_non_video:
+            infos.append(FileInfo(
+                path=fpath, size=st.st_size, mtime=st.st_mtime,
+                drive=self._get_drive_label(fpath, st.st_dev),
+                dev_ino=(st.st_dev, st.st_ino),
+                is_video=False,
+            ))
+
+        # Unique-size videos still need a duration for fuzzy matching
+        # (which compares by duration + perceptual frame hash, not exact
+        # hash) even though they'll never need a content hash. Fetch
+        # durations in parallel rather than one ffprobe call at a time.
+        if unique_video:
+            with ThreadPoolExecutor(max_workers=self.workers) as ex:
+                durations = list(ex.map(self._get_video_duration, (fp for fp, _, _ in unique_video)))
+            for (fpath, base_dir, st), dur in zip(unique_video, durations):
+                infos.append(FileInfo(
+                    path=fpath, size=st.st_size, mtime=st.st_mtime,
+                    drive=self._get_drive_label(fpath, st.st_dev),
+                    dev_ino=(st.st_dev, st.st_ino),
+                    duration=dur, is_video=True,
+                ))
+
+        # Stage 1: cheap partial hash (first+last chunk) only for files
+        # whose size actually collides with something else.
+        hashed_infos: List[FileInfo] = []
         completed = 0
         total_to_hash = len(to_hash)
         if to_hash:
             with ThreadPoolExecutor(max_workers=self.workers) as ex:
-                future_map = {ex.submit(self._hash_file, ft[0], True): ft for ft in to_hash}
+                future_map = {ex.submit(self._hash_file, fp, st.st_size, True): (fp, bd, st) for fp, bd, st in to_hash}
                 for future in as_completed(future_map):
-                    fpath, base_dir = future_map[future]
+                    fpath, base_dir, st = future_map[future]
                     result = future.result()
                     completed += 1
                     if completed % 100 == 0 or completed == total_to_hash:
@@ -523,31 +622,25 @@ class HashScoutCore:
 
                     if result:
                         phash, dur = result
-                        try:
-                            st = fpath.stat()
-                        except OSError:
-                            continue
-                        infos.append(FileInfo(
+                        fi = FileInfo(
                             path=fpath, size=st.st_size, mtime=st.st_mtime,
                             drive=self._get_drive_label(fpath, st.st_dev),
                             dev_ino=(st.st_dev, st.st_ino),
                             partial_hash=phash, duration=dur,
                             is_video=fpath.suffix.lower() in VIDEO_EXTENSIONS,
-                        ))
+                        )
+                        infos.append(fi)
+                        hashed_infos.append(fi)
             print()
-
-        # Only freshly-hashed files (not cache hits) need stage 2 below --
-        # cache hits already carry a verified full sha256.
-        fresh_infos = [i for i in infos if i.sha256 is None]
 
         # Stage 2: full-hash verification, but only for files that actually
         # collide on (size, partial_hash) -- everything else is unique
         # enough already and doesn't need a full read.
         if not self.quick_mode:
-            if fresh_infos:
+            if hashed_infos:
                 print(f"[*] Full-hash verification stage...")
                 pre_groups: Dict[Tuple[int, str], List[FileInfo]] = {}
-                for info in fresh_infos:
+                for info in hashed_infos:
                     key = (info.size, info.partial_hash or "")
                     pre_groups.setdefault(key, []).append(info)
 
@@ -560,31 +653,32 @@ class HashScoutCore:
                     with ThreadPoolExecutor(max_workers=self.workers) as ex:
                         # compute_duration=False: duration was already
                         # captured in stage 1, no need to re-invoke ffprobe.
-                        future_map = {ex.submit(self._hash_file, i.path, False, False): i for i in collision_infos}
+                        future_map = {ex.submit(self._hash_file, i.path, i.size, False, False): i for i in collision_infos}
                         for future in as_completed(future_map):
                             info = future_map[future]
                             result = future.result()
                             info.sha256 = result[0] if result else info.partial_hash
-                for info in fresh_infos:
+                for info in hashed_infos:
                     if info.sha256 is None:
                         info.sha256 = info.partial_hash
         else:
-            for info in fresh_infos:
+            for info in hashed_infos:
                 info.sha256 = info.partial_hash
 
         # Persist newly-confirmed FULL hashes to the cache. Quick-mode
         # results are only a partial hash and are never written back --
         # doing so would let a later full (non-quick) scan wrongly trust
         # an unverified hash as if it had been fully confirmed.
-        if self.cache_file and not self.quick_mode and fresh_infos:
-            for info in fresh_infos:
+        if self.cache_file and not self.quick_mode and hashed_infos:
+            for info in hashed_infos:
                 if info.sha256:
                     self._cache_store(info.path, info.size, info.mtime, info.sha256, info.duration)
             self._save_cache()
 
         elapsed = time.time() - start
-        if cache_hits:
-            print(f"[+] Analysis complete in {elapsed:.1f}s ({cache_hits} from cache, {total_to_hash} freshly hashed)")
+        if cache_hits or skipped_unique:
+            print(f"[+] Analysis complete in {elapsed:.1f}s "
+                  f"({cache_hits} from cache, {skipped_unique} skipped by size, {total_to_hash} hashed)")
         else:
             print(f"[+] Analysis complete in {elapsed:.1f}s")
         return infos
@@ -1000,7 +1094,7 @@ class HashScoutShell(cmd.Cmd):
         self.last_groups: List[DuplicateGroup] = []
         self.last_infos: List[FileInfo] = []
         self.last_fuzzy_groups: List[FuzzyDuplicateGroup] = []
-        self.default_workers = 4
+        self.default_workers = DEFAULT_WORKERS
         self.default_trash = True
         self.default_exclude: List[str] = []
         self.default_include_empty = False
@@ -1038,7 +1132,7 @@ class HashScoutShell(cmd.Cmd):
 
     def _make_core(self, targets: List[Path], video_only: bool = False,
                    min_size: int = 0, max_size: int = 0,
-                   quick: bool = False, workers: int = 4,
+                   quick: bool = False, workers: int = DEFAULT_WORKERS,
                    include_empty: Optional[bool] = None,
                    skip_system: Optional[bool] = None,
                    cache_file: Optional[str] = None) -> HashScoutCore:
@@ -1517,7 +1611,8 @@ Examples:
         """,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
-    parser.add_argument("--workers", type=int, default=4, help="Hashing threads (default: 4)")
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                        help=f"Hashing threads (default: {DEFAULT_WORKERS}, based on this machine's CPU count)")
     parser.add_argument("--video-only", action="store_true", help="Scan only video files")
     parser.add_argument("--min-size", type=str, default="", help="Minimum file size (e.g., 10MB, 1GB)")
     parser.add_argument("--max-size", type=str, default="", help="Maximum file size")
