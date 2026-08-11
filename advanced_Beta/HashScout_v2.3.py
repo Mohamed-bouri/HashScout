@@ -137,7 +137,7 @@ class FileInfo:
     partial_hash: Optional[str] = None
     duration: Optional[float] = None
     is_video: bool = False
-    video_phash: Optional[List[str]] = None  # perceptual hash per sampled frame
+    video_phash: Optional[List[Tuple[float, str]]] = None  # (timestamp, phash) per sampled frame, chronological
     dev_ino: Optional[Tuple[int, int]] = None  # (st_dev, st_ino) -- identifies hardlinks
 
     def to_dict(self) -> dict:
@@ -185,14 +185,16 @@ class DuplicateGroup:
 @dataclass
 class FuzzyDuplicateGroup:
     """Videos that are probably the same content but NOT byte-identical
-    (different size/bitrate/resolution/container). Matched by duration +
-    perceptual frame hashing rather than exact hash, so these are
-    probabilistic -- always review before deleting."""
+    (different size/bitrate/resolution/container, or one is a trimmed cut
+    of the other). Matched by duration + perceptual frame hashing rather
+    than exact hash, so these are probabilistic -- always review before
+    deleting."""
     files: List[FileInfo] = field(default_factory=list)
     similarity: float = 0.0   # average perceptual match, 0-100%
     total_size: int = 0
     wasted_size: int = 0
     drives_involved: Set[str] = field(default_factory=set)
+    duration_spread: float = 0.0  # seconds between the shortest and longest member -- a large spread means trimming, not just re-encoding
 
     def __post_init__(self):
         if self.files:
@@ -200,6 +202,9 @@ class FuzzyDuplicateGroup:
             # Assumes you'd keep the largest/highest-quality copy
             self.wasted_size = self.total_size - max(f.size for f in self.files)
             self.drives_involved = {f.drive for f in self.files if f.drive}
+            durations = [f.duration for f in self.files if f.duration]
+            if durations:
+                self.duration_spread = max(durations) - min(durations)
 
 
 # ---------------------------------------------------------------------------
@@ -711,10 +716,27 @@ class HashScoutCore:
             self._ffmpeg_available = False
         return self._ffmpeg_available
 
-    def _extract_frame_phashes(self, path: Path, num_frames: int = 5) -> Optional[List[str]]:
-        """Sample num_frames evenly across the video and return a perceptual
-        hash per frame. Skips a small margin at the start/end to avoid
-        intro logos / black frames throwing off the match."""
+    @staticmethod
+    def _fingerprint_frame_count(duration: float, base_frames: int) -> int:
+        """How many frames to sample for a video of this length. A fixed
+        small frame count works fine for a 2-minute clip but leaves huge,
+        easy-to-miss gaps across a 2-hour one -- if the true matching
+        moment falls between two sparse samples, nothing will look close
+        enough to register as a match. Scaling sample count with duration
+        (roughly one sample every ~15s, capped) keeps that worst-case gap
+        bounded regardless of how long the video is."""
+        if duration <= 0:
+            return base_frames
+        target_gap = 15.0
+        by_duration = int(duration / target_gap) + 1
+        return max(base_frames, min(by_duration, 30))
+
+    def _extract_frame_phashes(self, path: Path, num_frames: int = 8) -> Optional[List[Tuple[float, str]]]:
+        """Sample frames evenly across the video and return (timestamp,
+        phash) pairs in chronological order. Skips a small margin at the
+        start/end to avoid intro logos / black frames throwing off the
+        match. Frame count scales with duration -- see
+        _fingerprint_frame_count."""
         duration = self._get_video_duration(path)
         if not duration or duration <= 1:
             return None
@@ -724,14 +746,15 @@ class HashScoutCore:
         except ImportError:
             return None
 
-        margin = min(duration * 0.05, 3.0)
+        n = self._fingerprint_frame_count(duration, num_frames)
+        margin = min(duration * 0.03, 2.0)
         span = max(duration - 2 * margin, 0.1)
-        if num_frames <= 1:
+        if n <= 1:
             timestamps = [duration / 2]
         else:
-            timestamps = [margin + span * i / (num_frames - 1) for i in range(num_frames)]
+            timestamps = [margin + span * i / (n - 1) for i in range(n)]
 
-        hashes: List[str] = []
+        frames: List[Tuple[float, str]] = []
         with tempfile.TemporaryDirectory() as tmpdir:
             for i, ts in enumerate(timestamps):
                 out_file = Path(tmpdir) / f"frame_{i}.jpg"
@@ -743,18 +766,90 @@ class HashScoutCore:
                     )
                     if out_file.exists() and out_file.stat().st_size > 0:
                         with Image.open(out_file) as img:
-                            hashes.append(str(imagehash.phash(img)))
+                            frames.append((ts, str(imagehash.phash(img))))
                 except Exception:
                     continue
-        return hashes if hashes else None
+        return frames if frames else None
 
-    def find_fuzzy_video_duplicates(self, infos: List[FileInfo], duration_tolerance: float = 2.0,
-                                     num_frames: int = 5, phash_threshold: int = 10) -> List[FuzzyDuplicateGroup]:
+    @staticmethod
+    def _compare_fingerprints(short_fp: List[Tuple[float, str]], long_fp: List[Tuple[float, str]],
+                               phash_threshold: int) -> Optional[Tuple[float, float]]:
+        """Compare two chronological (timestamp, phash) fingerprints,
+        where `short_fp` belongs to the shorter-duration video of the pair
+        and `long_fp` to the longer one.
+
+        The old approach assumed frame k in one video lines up with frame
+        k in the other -- true only if both videos start at the same
+        moment and run at the same relative pace, which silently breaks
+        the instant either one is trimmed from the start, the end, or
+        anywhere in between. Instead, each query (short_fp) frame is
+        matched against its single best match anywhere in the reference
+        (long_fp) fingerprint. That alone would be too permissive on its
+        own (generic-looking frames can spuriously "best match" almost
+        anything), so a genuine trimmed-subsequence match is additionally
+        required to have those best-match positions increase in roughly
+        the same order as the query frames -- real trims shift content,
+        they don't shuffle it. Matches whose best-hits land in scattered,
+        non-chronological positions are rejected even if the raw hash
+        distances looked fine in isolation.
+
+        Returns (similarity_percent, estimated_offset_seconds) if judged a
+        genuine match, else None. The offset is a rough estimate of how
+        much later the matching content starts in the reference video
+        (e.g. ~60s for a video with the first minute trimmed off)."""
+        if not short_fp or not long_fp:
+            return None
+
+        best_dists: List[int] = []
+        best_positions: List[int] = []
+        offsets: List[float] = []
+        for ts, h in short_fp:
+            best_d, best_idx = 65, -1
+            for idx, (ref_ts, ref_h) in enumerate(long_fp):
+                d = hamming_distance(h, ref_h)
+                if d < best_d:
+                    best_d, best_idx = d, idx
+            best_dists.append(best_d)
+            if best_idx >= 0:
+                best_positions.append(best_idx)
+                offsets.append(long_fp[best_idx][0] - ts)
+
+        if not best_dists:
+            return None
+        avg_dist = sum(best_dists) / len(best_dists)
+        if avg_dist > phash_threshold:
+            return None
+
+        # Same footage, just clipped, should produce best-match positions
+        # that climb in step with the query's own chronological order.
+        # Allow some slack for individual frame noise.
+        if len(best_positions) >= 2:
+            ordered_pairs = sum(1 for a, b in zip(best_positions, best_positions[1:]) if b >= a)
+            monotonic_fraction = ordered_pairs / (len(best_positions) - 1)
+            if monotonic_fraction < 0.7:
+                return None
+
+        similarity = max(0.0, 100.0 * (1 - avg_dist / 64.0))
+        est_offset = sum(offsets) / len(offsets) if offsets else 0.0
+        return similarity, est_offset
+
+    def find_fuzzy_video_duplicates(self, infos: List[FileInfo], duration_tolerance: float = 5.0,
+                                     duration_tolerance_ratio: float = 0.5,
+                                     num_frames: int = 8, phash_threshold: int = 10) -> List[FuzzyDuplicateGroup]:
         """Find videos that are probably the same content despite different
-        bytes/size (re-encoded, different bitrate/resolution/container).
-        Two-stage: cheap duration bucketing narrows candidates, then
-        perceptual frame hashing confirms. Results are probabilistic --
-        callers should treat them as review-only, never auto-delete."""
+        bytes/size -- re-encoded, different bitrate/resolution/container,
+        OR trimmed (a few seconds or several minutes cut from the start,
+        end, or middle). Two-stage: duration bucketing narrows candidates,
+        then alignment-robust perceptual frame hashing confirms. Results
+        are probabilistic -- callers should treat them as review-only,
+        never auto-delete.
+
+        The duration gate allows a candidate pair's runtimes to differ by
+        whichever is larger of `duration_tolerance` (a flat number of
+        seconds -- keeps short clips from matching everything) or
+        `duration_tolerance_ratio` of the shorter video's own duration
+        (lets a long video tolerate a proportionally large trim, e.g. a
+        couple of minutes off a feature-length file)."""
         videos = [i for i in infos if i.is_video and i.duration is not None and i.duration > 0]
         if len(videos) < 2:
             return []
@@ -774,10 +869,17 @@ class HashScoutCore:
         videos.sort(key=lambda f: f.duration)
         n = len(videos)
 
+        def _max_gap(shorter_duration: float) -> float:
+            return max(duration_tolerance, duration_tolerance_ratio * shorter_duration)
+
         candidate_pairs: List[Tuple[int, int]] = []
         for i in range(n):
+            allowed = _max_gap(videos[i].duration)
             for j in range(i + 1, n):
-                if videos[j].duration - videos[i].duration > duration_tolerance:
+                # videos[] is duration-sorted and `allowed` only depends on
+                # i, so once the gap exceeds it, every later j (an even
+                # larger duration) only makes the gap bigger -- break holds.
+                if videos[j].duration - videos[i].duration > allowed:
                     break
                 candidate_pairs.append((i, j))
 
@@ -818,16 +920,14 @@ class HashScoutCore:
 
         pair_similarity: Dict[Tuple[int, int], float] = {}
         for i, j in candidate_pairs:
-            hi, hj = videos[i].video_phash, videos[j].video_phash
-            if not hi or not hj:
+            # videos is duration-sorted (i <= j), so i is always the
+            # shorter/query side and j the longer/reference side.
+            result = self._compare_fingerprints(videos[i].video_phash, videos[j].video_phash, phash_threshold)
+            if result is None:
                 continue
-            k = min(len(hi), len(hj))
-            if k == 0:
-                continue
-            avg_dist = sum(hamming_distance(hi[x], hj[x]) for x in range(k)) / k
-            if avg_dist <= phash_threshold:
-                union(i, j)
-                pair_similarity[(i, j)] = max(0.0, 100.0 * (1 - avg_dist / 64.0))
+            similarity, _offset = result
+            union(i, j)
+            pair_similarity[(i, j)] = similarity
 
         clusters: Dict[int, List[int]] = {}
         for idx in range(n):
@@ -926,6 +1026,9 @@ class OutputFormatter:
             drives_str = ", ".join(sorted(g.drives_involved))
             lines.append(f"\n--- [ Fuzzy Group {i} / {len(groups)} ] ~{g.similarity:.0f}% match ---")
             lines.append(f"Drives: {drives_str} | Potential savings: {format_size(g.wasted_size)}")
+            if g.duration_spread > 2:
+                lines.append(f"Runtime differs by up to {format_duration(g.duration_spread)} across this group "
+                              "-- looks like a trim, not just a re-encode.")
             for j, f in enumerate(g.files, 1):
                 dur = f" | {format_duration(f.duration)}" if f.duration else ""
                 mod = datetime.fromtimestamp(f.mtime).strftime("%Y-%m-%d %H:%M")
@@ -1108,7 +1211,8 @@ class HashScoutShell(cmd.Cmd):
     # recognized as --fuzzy-frames' argument.
     _SCAN_VALUE_FLAGS = {
         "--workers", "-w", "--min-size", "-min", "--max-size", "-max",
-        "--fuzzy-tolerance", "--fuzzy-frames", "--fuzzy-threshold", "--cache",
+        "--fuzzy-tolerance", "--fuzzy-tolerance-ratio", "--fuzzy-frames",
+        "--fuzzy-threshold", "--cache",
     }
 
     def _parse_paths(self, args: List[str]) -> List[Path]:
@@ -1167,12 +1271,24 @@ class HashScoutShell(cmd.Cmd):
         Scan one or multiple directories/drives for duplicates.
 
         --fuzzy                 Also find videos that are the SAME content
-                                 but a DIFFERENT size (re-encoded, trimmed,
-                                 different bitrate/resolution/container).
-                                 Matches by duration + perceptual frame
-                                 hashing. Needs ffmpeg + Pillow + imagehash.
-        --fuzzy-tolerance N      Max duration difference in seconds (default 2)
-        --fuzzy-frames N         Frames sampled per video (default 5)
+                                 but a DIFFERENT size (re-encoded, different
+                                 bitrate/resolution/container) OR TRIMMED
+                                 (seconds or minutes cut from the start,
+                                 end, or middle). Matches by duration +
+                                 alignment-aware frame hashing, so a 1080p
+                                 original and a 720p copy missing its first
+                                 minute still match. Needs ffmpeg + Pillow +
+                                 imagehash.
+        --fuzzy-tolerance N      Flat duration-difference allowance in
+                                 seconds (default 5)
+        --fuzzy-tolerance-ratio R  ALSO allow a duration gap up to R times
+                                 the shorter video's own length (default
+                                 0.5 = 50%%), so a big trim on a long
+                                 video is still considered a candidate.
+                                 Whichever of the two allowances is larger
+                                 wins.
+        --fuzzy-frames N         Baseline frames sampled per video; longer
+                                 videos sample more automatically (default 8)
         --fuzzy-threshold N      Max avg hash distance to count as a match,
                                  0-64, lower = stricter (default 10)
         --include-empty          Also consider 0-byte files (skipped by default)
@@ -1185,6 +1301,7 @@ class HashScoutShell(cmd.Cmd):
           scan C:\ D:\ E:\ --video
           scan ~/Downloads ~/Videos ~/Backups --workers 8
           scan ~/Videos --video --fuzzy
+          scan ~/Videos --video --fuzzy --fuzzy-tolerance-ratio 0.4
           scan ~/Media --skip-system --cache ~/.hashscout_cache.json
         """
         if not arg.strip():
@@ -1210,8 +1327,9 @@ class HashScoutShell(cmd.Cmd):
         workers = self.default_workers
         min_sz = 0
         max_sz = 0
-        fuzzy_tolerance = 2.0
-        fuzzy_frames = 5
+        fuzzy_tolerance = 5.0
+        fuzzy_tolerance_ratio = 0.5
+        fuzzy_frames = 8
         fuzzy_threshold = 10
         cache_file = self.default_cache_file
 
@@ -1224,6 +1342,8 @@ class HashScoutShell(cmd.Cmd):
                 max_sz = parse_size(parts[i + 1])
             if p == "--fuzzy-tolerance" and i + 1 < len(parts):
                 fuzzy_tolerance = float(parts[i + 1])
+            if p == "--fuzzy-tolerance-ratio" and i + 1 < len(parts):
+                fuzzy_tolerance_ratio = float(parts[i + 1])
             if p == "--fuzzy-frames" and i + 1 < len(parts):
                 fuzzy_frames = int(parts[i + 1])
             if p == "--fuzzy-threshold" and i + 1 < len(parts):
@@ -1245,26 +1365,29 @@ class HashScoutShell(cmd.Cmd):
         self._show_groups(self.last_groups)
 
         if fuzzy:
-            self._run_fuzzy(core, fuzzy_tolerance, fuzzy_frames, fuzzy_threshold)
+            self._run_fuzzy(core, fuzzy_tolerance, fuzzy_tolerance_ratio, fuzzy_frames, fuzzy_threshold)
 
-    def _run_fuzzy(self, core: HashScoutCore, tolerance: float, frames: int, threshold: int):
+    def _run_fuzzy(self, core: HashScoutCore, tolerance: float, tolerance_ratio: float, frames: int, threshold: int):
         """Run fuzzy video matching over the last scan's files, skipping
         anything already caught by exact-hash matching."""
         exact_paths = {f.path for g in self.last_groups for f in g.files}
         candidates = [i for i in self.last_infos if i.is_video and i.path not in exact_paths]
         self.last_fuzzy_groups = core.find_fuzzy_video_duplicates(
-            candidates, duration_tolerance=tolerance, num_frames=frames, phash_threshold=threshold
+            candidates, duration_tolerance=tolerance, duration_tolerance_ratio=tolerance_ratio,
+            num_frames=frames, phash_threshold=threshold
         )
         print(OutputFormatter.fuzzy_detailed(self.last_fuzzy_groups))
 
     def do_fuzzy(self, arg):
         """
-        fuzzy [--tolerance 2] [--frames 5] [--threshold 10]
-        Find videos that are the SAME content but a DIFFERENT file size,
-        among the files from the last 'scan' (run 'scan' first). Matches
-        by duration + perceptual frame hashing -- these are PROBABLE
-        matches, not byte-identical, so review before deleting.
-        'clean' never touches fuzzy groups.
+        fuzzy [--tolerance 5] [--ratio 0.5] [--frames 8] [--threshold 10]
+        Find videos that are the SAME content but a DIFFERENT file size --
+        re-encoded/different resolution, OR trimmed (seconds to minutes
+        cut off the start/end/middle) -- among the files from the last
+        'scan' (run 'scan' first). Matches by duration + alignment-aware
+        perceptual frame hashing -- these are PROBABLE matches, not
+        byte-identical, so review before deleting. 'clean' never touches
+        fuzzy groups.
         """
         if not self.last_infos:
             print("[!] No scan results. Run 'scan <path>' first.")
@@ -1275,10 +1398,12 @@ class HashScoutShell(cmd.Cmd):
         except ValueError as e:
             print(f"[!] Error parsing command: {e}")
             return 
-        tolerance, frames, threshold = 2.0, 5, 10
+        tolerance, tolerance_ratio, frames, threshold = 5.0, 0.5, 8, 10
         for i, p in enumerate(parts):
             if p == "--tolerance" and i + 1 < len(parts):
                 tolerance = float(parts[i + 1])
+            if p == "--ratio" and i + 1 < len(parts):
+                tolerance_ratio = float(parts[i + 1])
             if p == "--frames" and i + 1 < len(parts):
                 frames = int(parts[i + 1])
             if p == "--threshold" and i + 1 < len(parts):
@@ -1286,7 +1411,7 @@ class HashScoutShell(cmd.Cmd):
 
         core = self._make_core(self.current_dirs, workers=self.default_workers)
         core.exclude = self.default_exclude  # inherit current shell excludes
-        self._run_fuzzy(core, tolerance, frames, threshold)
+        self._run_fuzzy(core, tolerance, tolerance_ratio, frames, threshold)
 
     def do_clean(self, arg):
         """
@@ -1547,19 +1672,26 @@ class HashScoutShell(cmd.Cmd):
                            Information, and other common junk dirs
       --cache <path>       Reuse/save verified hashes across scans
       --fuzzy              Also find same-content videos of DIFFERENT size
-                           (re-encoded/trimmed) via duration + frame hash
+                           OR TRIMMED length (seconds to minutes cut from
+                           start/end/middle) via duration + alignment-
+                           aware frame hashing -- resolution changes
+                           (1080p vs 720p) match fine too
 
       Examples:
         scan C:\Users\Admin\Pictures
         scan C:\ D:\ E:\ --video
         scan ~/Downloads ~/Videos ~/Backups --workers 8
         scan ~/Videos --video --fuzzy
+        scan ~/Videos --video --fuzzy --fuzzy-tolerance-ratio 0.4
         scan ~/Media --skip-system --cache ~/.hashscout_cache.json
 
-  fuzzy [opts]              Find same-content/different-size video
-                             duplicates from the last scan
-      --tolerance N          Max duration difference, seconds (default 2)
-      --frames N             Frames sampled per video (default 5)
+  fuzzy [opts]              Find same-content/different-size/trimmed
+                             video duplicates from the last scan
+      --tolerance N          Flat duration-diff allowance, seconds (default 5)
+      --ratio R              ALSO allow a gap up to R x the shorter
+                             video's length, for big trims (default 0.5)
+      --frames N             Baseline frames/video; scales up for longer
+                             videos automatically (default 8)
       --threshold N          Match strictness, 0-64 (default 10)
 
   clean [opts]             Clean duplicates from last scan
@@ -1624,9 +1756,14 @@ Examples:
     parser.add_argument("--cache-file", type=str, default=None,
                         help="Persist verified hashes here to speed up repeat scans")
     parser.add_argument("--fuzzy", action="store_true",
-                        help="Also find same-content videos of different size (re-encoded/trimmed)")
-    parser.add_argument("--fuzzy-tolerance", type=float, default=2.0, help="Max duration diff in seconds (default: 2)")
-    parser.add_argument("--fuzzy-frames", type=int, default=5, help="Frames sampled per video (default: 5)")
+                        help="Also find same-content videos of different size or trimmed length")
+    parser.add_argument("--fuzzy-tolerance", type=float, default=5.0,
+                        help="Flat duration-difference allowance in seconds (default: 5)")
+    parser.add_argument("--fuzzy-tolerance-ratio", type=float, default=0.5,
+                        help="ALSO allow a duration gap up to this fraction of the shorter video's "
+                             "own length, so long videos tolerate bigger trims (default: 0.5)")
+    parser.add_argument("--fuzzy-frames", type=int, default=8,
+                        help="Baseline frames sampled per video; longer videos sample more automatically (default: 8)")
     parser.add_argument("--fuzzy-threshold", type=int, default=10, help="Match strictness, 0-64 (default: 10)")
     parser.add_argument("--format", choices=["table", "detailed", "json", "csv"], default="detailed",
                         help="Output format (default: detailed)")
@@ -1718,6 +1855,7 @@ def run_cli():
             candidates = [i for i in infos if i.is_video and i.path not in exact_paths]
             fuzzy_groups = core.find_fuzzy_video_duplicates(
                 candidates, duration_tolerance=args.fuzzy_tolerance,
+                duration_tolerance_ratio=args.fuzzy_tolerance_ratio,
                 num_frames=args.fuzzy_frames, phash_threshold=args.fuzzy_threshold,
             )
             print(fmt.fuzzy_detailed(fuzzy_groups))
