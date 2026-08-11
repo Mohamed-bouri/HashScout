@@ -109,7 +109,7 @@ Type 'exit' to quit.
 contact@mbeffects.com for more help :-)
 """
 
-PROMPT = "\033[92mHashScout>\033[0m "
+PROMPT = "HashScout>"
 
 # ---------------------------------------------------------------------------
 # Enums & Data Classes
@@ -1657,70 +1657,101 @@ class HashScoutShell(cmd.Cmd):
     def do_help(self, arg):
         """Show help."""
         print(r"""
-====================================================================
-                         AVAILABLE COMMANDS
-====================================================================
-  scan <path> [path2] ... [opts]
-      Scan one or multiple directories/drives for duplicates.
-      --video, -v          Only video files
-      --quick, -q          Skip full hash (faster)
-      --workers N          Thread count
-      --min-size 10MB      Minimum file size
-      --max-size 1GB       Maximum file size
-      --include-empty      Also consider 0-byte files (skipped by default)
-      --skip-system        Ignore .git, node_modules, System Volume
-                           Information, and other common junk dirs
-      --cache <path>       Reuse/save verified hashes across scans
-      --fuzzy              Also find same-content videos of DIFFERENT size
-                           OR TRIMMED length (seconds to minutes cut from
-                           start/end/middle) via duration + alignment-
-                           aware frame hashing -- resolution changes
-                           (1080p vs 720p) match fine too
+╔════════════════════════════════════════════════════════════════════════════╗
+║                          HASH SCOUT  v2.3                                  ║
+║                    Intelligent Duplicate File Finder                       ║
+╚════════════════════════════════════════════════════════════════════════════╝
 
-      Examples:
-        scan C:\Users\Admin\Pictures
-        scan C:\ D:\ E:\ --video
-        scan ~/Downloads ~/Videos ~/Backups --workers 8
-        scan ~/Videos --video --fuzzy
-        scan ~/Videos --video --fuzzy --fuzzy-tolerance-ratio 0.4
-        scan ~/Media --skip-system --cache ~/.hashscout_cache.json
+╔════════════════════════════════════════════════════════════════════════════╗
+║                         AVAILABLE COMMANDS                                 ║
+╚════════════════════════════════════════════════════════════════════════════╝
 
-  fuzzy [opts]              Find same-content/different-size/trimmed
-                             video duplicates from the last scan
-      --tolerance N          Flat duration-diff allowance, seconds (default 5)
-      --ratio R              ALSO allow a gap up to R x the shorter
-                             video's length, for big trims (default 0.5)
-      --frames N             Baseline frames/video; scales up for longer
-                             videos automatically (default 8)
-      --threshold N          Match strictness, 0-64 (default 10)
+╭────────────────────────────────────────────────────────────────────────────╮
+│  scan <path> [path2] ... [opts]                                            │
+│      Scan one or multiple directories/drives for duplicates.               │
+│                                                                            │
+│      OPTIONS:                                                              │
+│      --video, -v          Only video files                                 │
+│      --quick, -q          Skip full hash (faster)                          │
+│      --workers N          Thread count                                     │
+│      --min-size 10MB      Minimum file size                                │
+│      --max-size 1GB       Maximum file size                                │
+│      --include-empty      Also consider 0-byte files (skipped by default)  │
+│      --skip-system        Ignore .git, node_modules, System Volume         │
+│                           Information, and other common junk dirs          │
+│      --cache <path>       Reuse/save verified hashes across scans          │
+│      --fuzzy              Also find same-content videos of DIFFERENT size  │
+│                           OR TRIMMED length (seconds to minutes cut from   │
+│                           start/end/middle) via duration + alignment-      │
+│                           aware frame hashing -- resolution changes        │
+│                           (1080p vs 720p) match fine too                   │
+│                                                                            │
+│      EXAMPLES:                                                             │
+│        scan C:\Users\Admin\Pictures                                        │
+│        scan C:\ D:\ E:\ --video                                            │
+│        scan ~/Downloads ~/Videos ~/Backups --workers 8                     │
+│        scan ~/Videos --video --fuzzy                                       │
+│        scan ~/Videos --video --fuzzy --fuzzy-tolerance-ratio 0.4           │
+│        scan ~/Media --skip-system --cache ~/.hashscout_cache.json          │
+╰────────────────────────────────────────────────────────────────────────────╯
 
-  clean [opts]             Clean duplicates from last scan
-      --strategy <name>    newest | oldest | largest | smallest |
-                           shortest | longest | first | spread |
-                           manual (default)
-      --trash              Move to trash (default)
-      --no-trash           Permanent delete (asks to confirm; --yes skips)
-      --apply              Actually delete (default is dry-run)
-      --interactive, -i    Force interactive picker
-      --yes, -y            Skip the permanent-delete confirmation prompt
+╭────────────────────────────────────────────────────────────────────────────╮
+│  fuzzy [opts]                                                              │
+│      Find same-content/different-size/trimmed video duplicates             │
+│      from the last scan                                                    │
+│                                                                            │
+│      OPTIONS:                                                              │
+│      --tolerance N          Flat duration-diff allowance, seconds (def 5)  │
+│      --ratio R              ALSO allow gap up to R × shorter video length  │
+│                             for big trims (default 0.5)                    │
+│      --frames N             Baseline frames/video; scales up for longer    │
+│                             videos automatically (default 8)               │
+│      --threshold N          Match strictness, 0-64 (default 10)            │
+╰────────────────────────────────────────────────────────────────────────────╯
 
-      spread strategy:     Keeps one copy per drive, deletes extras
-      Hardlinked copies never count toward "space freed" -- they already
-      share the same bytes on disk, so removing one frees nothing.
+╭────────────────────────────────────────────────────────────────────────────╮
+│  clean [opts]                                                              │
+│      Clean duplicates from last scan                                       │
+│                                                                            │
+│      OPTIONS:                                                              │
+│      --strategy <name>    newest | oldest | largest | smallest |           │
+│                           shortest | longest | first | spread | manual     │
+│                           (default)                                        │
+│      --trash              Move to trash (default)                          │
+│      --no-trash           Permanent delete (asks to confirm; --yes skips)  │
+│      --apply              Actually delete (default is dry-run)             │
+│      --interactive, -i    Force interactive picker                         │
+│      --yes, -y            Skip the permanent-delete confirmation prompt    │
+│                                                                            │
+│      NOTES:                                                                │
+│      spread strategy:     Keeps one copy per drive, deletes extras         │
+│      Hardlinked copies never count toward "space freed" — they already     │
+│      share the same bytes on disk, so removing one frees nothing.          │
+╰────────────────────────────────────────────────────────────────────────────╯
 
-  export <file>            Export last scan (.json, .csv, .txt)
+╭────────────────────────────────────────────────────────────────────────────╮
+│  export <file>            Export last scan (.json, .csv, .txt)             │
+│  cd <path>                Change default directory                         │
+│  pwd                      Show current directory                           │
+│  exclude <pattern>        Add ignore glob pattern                          │
+│  exclude --list           List ignore patterns                             │
+│  exclude --clear          Clear ignore patterns                            │
+│  cache <path>             Set persistent hash-cache file (speeds re-scans) │
+│  cache --off              Disable the hash cache                           │
+│  workers <N>              Set default thread count                         │
+│  clear                    Clear screen                                     │
+│  exit / quit              Leave HashScout                                  │
+╰────────────────────────────────────────────────────────────────────────────╯
 
-  cd <path>                Change default directory
-  pwd                      Show current directory
-  exclude <pattern>        Add ignore glob pattern
-  exclude --list           List ignore patterns
-  exclude --clear          Clear ignore patterns
-  cache <path>             Set persistent hash-cache file (speeds up re-scans)
-  cache --off              Disable the hash cache
-  workers <N>              Set default thread count
-  clear                    Clear screen
-  exit / quit              Leave HashScout
-====================================================================
+╔════════════════════════════════════════════════════════════════════════════╗
+║                         QUICK TIPS                                         ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║  * Use --quick for initial scans, then follow up with full hashing         ║
+║  * Enable --cache to dramatically speed up repeated scans                  ║
+║  * Try --fuzzy for finding near-duplicate videos (trimmed, re-encoded)     ║
+║  * Always run clean as dry-run first (default) to review before deleting   ║
+║  * Use spread strategy to keep at least one copy per physical drive        ║
+╚════════════════════════════════════════════════════════════════════════════╝
         """)
 
 
